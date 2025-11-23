@@ -18,3 +18,5 @@ if [ "$1" = "purge" ]; then
 	fi
 	rm -rf /var/lib/frankenphp /var/log/frankenphp /etc/frankenphp
 fi
+
+rm -f /etc/bash_completion.d/frankenphp

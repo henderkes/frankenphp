@@ -69,3 +69,8 @@ if [ -x /usr/bin/frankenphp ]; then
 	kill "$FRANKENPHP_PID" || true
 	wait "$FRANKENPHP_PID" 2>/dev/null || true
 fi
+
+if [ -x /usr/bin/frankenphp ]; then
+    /usr/bin/frankenphp completion bash | sed 's/caddy/frankenphp/g' > /etc/bash_completion.d/frankenphp 2>/dev/null || :
+    source /etc/bash_completion.d/frankenphp
+fi

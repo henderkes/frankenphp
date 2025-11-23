@@ -6,6 +6,8 @@ if [ "$1" -ge 1 ] && [ -x "/usr/lib/systemd/systemd-update-helper" ]; then
 fi
 
 if [ "$1" -eq 0 ]; then
+	rm -f /etc/bash_completion.d/frankenphp
+
 	if [ -x /usr/sbin/getsebool ]; then
 		# connect to ACME endpoint to request certificates
 		setsebool -P httpd_can_network_connect off
