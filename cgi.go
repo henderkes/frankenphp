@@ -2,11 +2,9 @@ package frankenphp
 
 // #cgo nocallback frankenphp_register_server_vars
 // #cgo nocallback frankenphp_register_variable_safe
-// #cgo nocallback frankenphp_register_known_variable
 // #cgo nocallback frankenphp_init_persistent_string
 // #cgo noescape frankenphp_register_server_vars
 // #cgo noescape frankenphp_register_variable_safe
-// #cgo noescape frankenphp_register_known_variable
 // #cgo noescape frankenphp_init_persistent_string
 // #include "frankenphp.h"
 // #include <php_variables.h>
@@ -15,8 +13,8 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
-	"net/http"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode/utf8"
 	"unsafe"
@@ -40,11 +38,11 @@ var cStringHTTPMethods = map[string]*C.char{
 	"PATCH":   C.CString("PATCH"),
 }
 
-// computeKnownVariables returns a set of CGI environment variables for the request.
-//
-// TODO: handle this case https://github.com/caddyserver/caddy/issues/3718
-// Inspired by https://github.com/caddyserver/caddy/blob/master/modules/caddyhttp/reverseproxy/fastcgi/fastcgi.go
-func addKnownVariablesToServer(fc *frankenPHPContext, trackVarsArray *C.zval) {
+// buildServerVars collects all $_SERVER entries and returns the cgo struct to
+// register them in a single cgo call. The returned slices (joinedHeaders,
+// knownHeaders, safeVars) must remain reachable until after the cgo call so
+// that the Go strings they reference stay alive.
+func buildServerVars(ctx context.Context, fc *frankenPHPContext) (C.frankenphp_server_vars, []string, []C.frankenphp_known_header, []C.frankenphp_safe_var) {
 	request := fc.request
 	// Separate remote IP and port; more lenient than net.SplitHostPort
 	var ip, port string
@@ -113,10 +111,62 @@ func addKnownVariablesToServer(fc *frankenPHPContext, trackVarsArray *C.zval) {
 
 	requestPath := ensureLeadingSlash(request.URL.Path)
 
-	C.frankenphp_register_server_vars(trackVarsArray, C.frankenphp_server_vars{
+	// Collect headers + prepared env into batched slices so the whole
+	// $_SERVER population goes through a single cgo call.
+	headerCount := len(request.Header)
+	envCount := len(fc.env)
+
+	// joinedHeaders retains the strings built by strings.Join so the
+	// *C.char pointers we store in knownHeaders/safeVars stay valid.
+	var (
+		joinedHeaders []string
+		knownHeaders  []C.frankenphp_known_header
+		safeVars      []C.frankenphp_safe_var
+	)
+	if headerCount != 0 {
+		joinedHeaders = make([]string, 0, headerCount)
+		knownHeaders = make([]C.frankenphp_known_header, 0, headerCount)
+	}
+	if headerCount != 0 || envCount != 0 {
+		safeVars = make([]C.frankenphp_safe_var, 0, headerCount+envCount)
+	}
+
+	for field, val := range request.Header {
+		v := strings.Join(val, ", ")
+		joinedHeaders = append(joinedHeaders, v)
+		if k := commonHeaders[field]; k != nil {
+			knownHeaders = append(knownHeaders, C.frankenphp_known_header{
+				key:       k,
+				value:     toUnsafeChar(v),
+				value_len: C.size_t(len(v)),
+			})
+			continue
+		}
+
+		// Uncommon header: sanitize the key through PHP. GetUnCommonHeader
+		// returns a null-terminated string.
+		safeVars = append(safeVars, C.frankenphp_safe_var{
+			key:       toUnsafeChar(phpheaders.GetUnCommonHeader(ctx, field)),
+			value:     toUnsafeChar(v),
+			value_len: C.size_t(len(v)),
+		})
+	}
+
+	// Prepared env has null-terminated keys (see PrepareEnv).
+	// NOTE: do not clear fc.env here; the map must remain alive so the
+	// Go pointers handed to C below stay valid through the cgo call.
+	for k, v := range fc.env {
+		safeVars = append(safeVars, C.frankenphp_safe_var{
+			key:       toUnsafeChar(k),
+			value:     toUnsafeChar(v),
+			value_len: C.size_t(len(v)),
+		})
+	}
+
+	sv := C.frankenphp_server_vars{
 		// approximate total length to avoid array re-hashing:
 		// 28 CGI vars + headers + environment
-		total_num_vars: C.size_t(28 + len(request.Header) + len(fc.env) + lengthOfEnv),
+		total_num_vars: C.size_t(28 + headerCount + envCount + lengthOfEnv),
 
 		// CGI vars with variable values
 		remote_addr:         toUnsafeChar(ip),
@@ -156,30 +206,18 @@ func addKnownVariablesToServer(fc *frankenPHPContext, trackVarsArray *C.zval) {
 		request_scheme: rs,          // "http" or "https"
 		ssl_protocol:   sslProtocol, // values from tlsProtocol
 		https:          https,       // "on" or empty
-	})
-}
-
-func addHeadersToServer(ctx context.Context, request *http.Request, trackVarsArray *C.zval) {
-	for field, val := range request.Header {
-		if k := commonHeaders[field]; k != nil {
-			v := strings.Join(val, ", ")
-			C.frankenphp_register_known_variable(k, toUnsafeChar(v), C.size_t(len(v)), trackVarsArray)
-			continue
-		}
-
-		// if the header name could not be cached, it needs to be registered safely
-		// this is more inefficient but allows additional sanitizing by PHP
-		k := phpheaders.GetUnCommonHeader(ctx, field)
-		v := strings.Join(val, ", ")
-		C.frankenphp_register_variable_safe(toUnsafeChar(k), toUnsafeChar(v), C.size_t(len(v)), trackVarsArray)
 	}
-}
 
-func addPreparedEnvToServer(fc *frankenPHPContext, trackVarsArray *C.zval) {
-	for k, v := range fc.env {
-		C.frankenphp_register_variable_safe(toUnsafeChar(k), toUnsafeChar(v), C.size_t(len(v)), trackVarsArray)
+	if len(knownHeaders) != 0 {
+		sv.known_headers = (*C.frankenphp_known_header)(unsafe.Pointer(&knownHeaders[0]))
+		sv.known_headers_count = C.size_t(len(knownHeaders))
 	}
-	fc.env = nil
+	if len(safeVars) != 0 {
+		sv.safe_vars = (*C.frankenphp_safe_var)(unsafe.Pointer(&safeVars[0]))
+		sv.safe_vars_count = C.size_t(len(safeVars))
+	}
+
+	return sv, joinedHeaders, knownHeaders, safeVars
 }
 
 //export go_register_server_variables
@@ -188,12 +226,25 @@ func go_register_server_variables(threadIndex C.uintptr_t, trackVarsArray *C.zva
 	fc := thread.frankenPHPContext()
 
 	if fc.request != nil {
-		addKnownVariablesToServer(fc, trackVarsArray)
-		addHeadersToServer(thread.context(), fc.request, trackVarsArray)
+		sv, joinedHeaders, knownHeaders, safeVars := buildServerVars(thread.context(), fc)
+		C.frankenphp_register_server_vars(trackVarsArray, sv)
+		// Keep backing storage for any *C.char pointers handed to C alive
+		// through the full cgo call. fc.env owns the prepared env key/value
+		// strings; it must stay reachable until the cgo call returns.
+		runtime.KeepAlive(joinedHeaders)
+		runtime.KeepAlive(knownHeaders)
+		runtime.KeepAlive(safeVars)
+		runtime.KeepAlive(fc.env)
+		fc.env = nil
+		return
 	}
 
-	// The Prepared Environment is registered last and can overwrite any previous values
-	addPreparedEnvToServer(fc, trackVarsArray)
+	// No request (e.g. worker boot dummy): only register the prepared env.
+	// This path is rare, so per-entry cgo calls are fine.
+	for k, v := range fc.env {
+		C.frankenphp_register_variable_safe(toUnsafeChar(k), toUnsafeChar(v), C.size_t(len(v)), trackVarsArray)
+	}
+	fc.env = nil
 }
 
 // splitCgiPath splits the request path into SCRIPT_NAME, SCRIPT_FILENAME, PATH_INFO, DOCUMENT_URI

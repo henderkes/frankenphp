@@ -863,6 +863,27 @@ void frankenphp_register_server_vars(zval *track_vars_array,
   ZVAL_EMPTY_STRING(&zv);
   zend_hash_update_ind(ht, frankenphp_strings.auth_type, &zv);
   zend_hash_update_ind(ht, frankenphp_strings.remote_ident, &zv);
+
+  /* Register request headers with cached zend_string keys */
+  for (size_t i = 0; i < vars.known_headers_count; i++) {
+    frankenphp_known_header *h = &vars.known_headers[i];
+    frankenphp_register_trusted_var(h->key, h->value, h->value_len, ht);
+  }
+
+  /* Register uncommon headers and prepared env vars safely */
+  for (size_t i = 0; i < vars.safe_vars_count; i++) {
+    frankenphp_safe_var *v = &vars.safe_vars[i];
+    char *val = v->value;
+    size_t new_val_len = v->value_len;
+    if (val == NULL) {
+      val = "";
+    }
+    if (!should_filter_var ||
+        sapi_module.input_filter(PARSE_SERVER, v->key, &val, new_val_len,
+                                 &new_val_len)) {
+      php_register_variable_safe(v->key, val, new_val_len, track_vars_array);
+    }
+  }
 }
 
 /** Create an immutable zend_string that lasts for the whole process **/

@@ -57,6 +57,23 @@ typedef struct go_string {
   char *data;
 } go_string;
 
+/* A request header whose PHP key is already cached as an interned zend_string
+ * (see frankenphp_strings and commonHeaders in phpmainthread.go). */
+typedef struct frankenphp_known_header {
+  zend_string *key;
+  char *value;
+  size_t value_len;
+} frankenphp_known_header;
+
+/* A request header or prepared environment variable whose key must still be
+ * registered through php_register_variable_safe. Keys must be
+ * null-terminated. */
+typedef struct frankenphp_safe_var {
+  char *key;
+  char *value;
+  size_t value_len;
+} frankenphp_safe_var;
+
 typedef struct frankenphp_server_vars {
   size_t total_num_vars;
   char *remote_addr;
@@ -94,6 +111,11 @@ typedef struct frankenphp_server_vars {
   zend_string *request_scheme;
   zend_string *ssl_protocol;
   zend_string *https;
+  /* Batched request headers/env: avoids an extra cgo call per entry. */
+  frankenphp_known_header *known_headers;
+  size_t known_headers_count;
+  frankenphp_safe_var *safe_vars;
+  size_t safe_vars_count;
 } frankenphp_server_vars;
 
 /**
