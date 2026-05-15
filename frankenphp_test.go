@@ -845,6 +845,33 @@ func BenchmarkHelloWorld(b *testing.B) {
 	}
 }
 
+func BenchmarkHelloWorldWorker(b *testing.B) {
+	cwd, _ := os.Getwd()
+	testDataDir := cwd + "/testdata/"
+
+	require.NoError(b, frankenphp.Init(
+		frankenphp.WithNumThreads(2),
+		frankenphp.WithWorkers("worker", testDataDir+"index.php", 1),
+	))
+	b.Cleanup(frankenphp.Shutdown)
+
+	opt := frankenphp.WithRequestDocumentRoot(testDataDir, false)
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		req, err := frankenphp.NewRequestWithContext(r, opt)
+		require.NoError(b, err)
+
+		require.NoError(b, frankenphp.ServeHTTP(w, req))
+	}
+
+	req := httptest.NewRequest("GET", "http://example.com/index.php", nil)
+	w := httptest.NewRecorder()
+
+	b.ResetTimer()
+	for b.Loop() {
+		handler(w, req)
+	}
+}
+
 func BenchmarkEcho(b *testing.B) {
 	require.NoError(b, frankenphp.Init())
 	b.Cleanup(frankenphp.Shutdown)
