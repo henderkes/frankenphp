@@ -1,6 +1,7 @@
 package frankenphp
 
 // #include "frankenphp.h"
+// #include <SAPI.h>
 import "C"
 import (
 	"context"
@@ -108,7 +109,9 @@ func (handler *workerThread) name() string {
 func (handler *workerThread) drain() {}
 
 func setupWorkerScript(handler *workerThread, worker *worker) {
-	metrics.StartWorker(worker.name)
+	if metricsEnabled {
+		metrics.StartWorker(worker.name)
+	}
 
 	// Create a dummy request to set up the worker
 	fc, err := newDummyContext(
@@ -149,7 +152,9 @@ func tearDownWorkerScript(handler *workerThread, exitStatus int) {
 
 	// on exit status 0 we just run the worker script again
 	if exitStatus == 0 && !handler.isBootingScript {
-		metrics.StopWorker(worker.name, StopReasonRestart)
+		if metricsEnabled {
+			metrics.StopWorker(worker.name, StopReasonRestart)
+		}
 
 		if globalLogger.Enabled(globalCtx, slog.LevelDebug) {
 			globalLogger.LogAttrs(globalCtx, slog.LevelDebug, "restarting", slog.String("worker", worker.name), slog.Int("thread", handler.thread.threadIndex), slog.Int("exit_status", exitStatus))
@@ -159,10 +164,12 @@ func tearDownWorkerScript(handler *workerThread, exitStatus int) {
 	}
 
 	// worker has thrown a fatal error or has not reached frankenphp_handle_request
-	if handler.isBootingScript {
-		metrics.StopWorker(worker.name, StopReasonBootFailure)
-	} else {
-		metrics.StopWorker(worker.name, StopReasonCrash)
+	if metricsEnabled {
+		if handler.isBootingScript {
+			metrics.StopWorker(worker.name, StopReasonBootFailure)
+		} else {
+			metrics.StopWorker(worker.name, StopReasonCrash)
+		}
 	}
 
 	if !handler.isBootingScript {
@@ -220,7 +227,9 @@ func (handler *workerThread) waitForWorkerRequest() (bool, any) {
 		}
 
 		// worker is truly ready only after reaching frankenphp_handle_request()
-		metrics.ReadyWorker(handler.worker.name)
+		if metricsEnabled {
+			metrics.ReadyWorker(handler.worker.name)
+		}
 	}
 
 	// max_requests reached: signal reboot for full ZTS cleanup
@@ -281,28 +290,35 @@ func (handler *workerThread) waitForWorkerRequest() (bool, any) {
 }
 
 // go_frankenphp_worker_handle_request_start is called at the start of every php request served.
+// It waits for the next request, populates SG(request_info) and pre-builds the
+// $_SERVER data that frankenphp_register_variables will consume, all in a
+// single cgo callback to minimize crossings in the steady-state hot path.
 //
 //export go_frankenphp_worker_handle_request_start
-func go_frankenphp_worker_handle_request_start(threadIndex C.uintptr_t) (C.bool, unsafe.Pointer) {
-	handler := phpThreads[threadIndex].handler.(*workerThread)
+func go_frankenphp_worker_handle_request_start(threadIndex C.uintptr_t, info *C.sapi_request_info) (C.bool, unsafe.Pointer, *C.char) {
+	thread := phpThreads[threadIndex]
+	handler := thread.handler.(*workerThread)
 	hasRequest, parameters := handler.waitForWorkerRequest()
 
-	if parameters != nil {
-		var ptr unsafe.Pointer
+	if !hasRequest {
+		return false, nil, nil
+	}
 
+	var ptr unsafe.Pointer
+	if parameters != nil {
 		switch p := parameters.(type) {
 		case unsafe.Pointer:
 			ptr = p
-
 		default:
 			ptr = PHPValue(p)
 		}
-		handler.thread.Pin(ptr)
-
-		return C.bool(hasRequest), ptr
+		thread.Pin(ptr)
 	}
 
-	return C.bool(hasRequest), nil
+	fc := handler.workerFrankenPHPContext
+	authHeader := updateRequestInfo(thread, fc, info)
+
+	return C.bool(true), ptr, authHeader
 }
 
 // go_frankenphp_finish_worker_request is called at the end of every php request served.
@@ -310,13 +326,13 @@ func go_frankenphp_worker_handle_request_start(threadIndex C.uintptr_t) (C.bool,
 //export go_frankenphp_finish_worker_request
 func go_frankenphp_finish_worker_request(threadIndex C.uintptr_t, retval *C.zval) {
 	thread := phpThreads[threadIndex]
-	ctx := thread.context()
-	fc := ctx.Value(contextKey).(*frankenPHPContext)
+	handler := thread.handler.(*workerThread)
+	fc := handler.workerFrankenPHPContext
 
 	if retval != nil {
 		r, err := GoValue[any](unsafe.Pointer(retval))
-		if err != nil && globalLogger.Enabled(ctx, slog.LevelError) {
-			globalLogger.LogAttrs(ctx, slog.LevelError, "cannot convert return value", slog.Any("error", err), slog.Int("thread", thread.threadIndex))
+		if err != nil && globalLogger.Enabled(handler.workerContext, slog.LevelError) {
+			globalLogger.LogAttrs(handler.workerContext, slog.LevelError, "cannot convert return value", slog.Any("error", err), slog.Int("thread", thread.threadIndex))
 		}
 
 		fc.handlerReturn = r
@@ -326,15 +342,15 @@ func go_frankenphp_finish_worker_request(threadIndex C.uintptr_t, retval *C.zval
 
 	fc.closeContext()
 	thread.contextMu.Lock()
-	thread.handler.(*workerThread).workerFrankenPHPContext = nil
-	thread.handler.(*workerThread).workerContext = nil
+	handler.workerFrankenPHPContext = nil
+	handler.workerContext = nil
 	thread.contextMu.Unlock()
 
-	if globalLogger.Enabled(ctx, slog.LevelDebug) {
+	if globalLogger.Enabled(globalCtx, slog.LevelDebug) {
 		if fc.request == nil {
-			fc.logger.LogAttrs(ctx, slog.LevelDebug, "request handling finished", slog.String("worker", fc.worker.name), slog.Int("thread", thread.threadIndex))
+			fc.logger.LogAttrs(globalCtx, slog.LevelDebug, "request handling finished", slog.String("worker", fc.worker.name), slog.Int("thread", thread.threadIndex))
 		} else {
-			fc.logger.LogAttrs(ctx, slog.LevelDebug, "request handling finished", slog.String("worker", fc.worker.name), slog.Int("thread", thread.threadIndex), slog.String("url", fc.request.RequestURI))
+			fc.logger.LogAttrs(globalCtx, slog.LevelDebug, "request handling finished", slog.String("worker", fc.worker.name), slog.Int("thread", thread.threadIndex), slog.String("url", fc.request.RequestURI))
 		}
 	}
 }

@@ -38,11 +38,13 @@ var cStringHTTPMethods = map[string]*C.char{
 	"PATCH":   C.CString("PATCH"),
 }
 
-// computeKnownVariables returns a set of CGI environment variables for the request.
+// buildKnownVariablesForServer builds the frankenphp_server_vars struct for
+// the current request. The returned struct holds pointers into Go memory
+// which the caller must keep pinned for the duration of the request.
 //
 // TODO: handle this case https://github.com/caddyserver/caddy/issues/3718
 // Inspired by https://github.com/caddyserver/caddy/blob/master/modules/caddyhttp/reverseproxy/fastcgi/fastcgi.go
-func addKnownVariablesToServer(fc *frankenPHPContext, trackVarsArray *C.zval) {
+func buildKnownVariablesForServer(fc *frankenPHPContext) C.frankenphp_server_vars {
 	request := fc.request
 	// Separate remote IP and port; more lenient than net.SplitHostPort
 	var ip, port string
@@ -111,7 +113,7 @@ func addKnownVariablesToServer(fc *frankenPHPContext, trackVarsArray *C.zval) {
 
 	phpSelf := fc.scriptName + fc.pathInfo
 
-	C.frankenphp_register_server_vars(trackVarsArray, C.frankenphp_server_vars{
+	return C.frankenphp_server_vars{
 		// approximate total length to avoid array re-hashing:
 		// 28 CGI vars + headers + environment
 		total_num_vars: C.size_t(28 + len(request.Header) + len(fc.env) + lengthOfEnv),
@@ -154,7 +156,11 @@ func addKnownVariablesToServer(fc *frankenPHPContext, trackVarsArray *C.zval) {
 		request_scheme: rs,          // "http" or "https"
 		ssl_protocol:   sslProtocol, // values from tlsProtocol
 		https:          https,       // "on" or empty
-	})
+	}
+}
+
+func addKnownVariablesToServer(fc *frankenPHPContext, trackVarsArray *C.zval) {
+	C.frankenphp_register_server_vars(trackVarsArray, buildKnownVariablesForServer(fc))
 }
 
 func addHeadersToServer(ctx context.Context, request *http.Request, trackVarsArray *C.zval) {
@@ -187,11 +193,15 @@ func go_register_server_variables(threadIndex C.uintptr_t, trackVarsArray *C.zva
 
 	if fc.request != nil {
 		addKnownVariablesToServer(fc, trackVarsArray)
-		addHeadersToServer(thread.context(), fc.request, trackVarsArray)
+		if len(fc.request.Header) > 0 {
+			addHeadersToServer(thread.context(), fc.request, trackVarsArray)
+		}
 	}
 
 	// The Prepared Environment is registered last and can overwrite any previous values
-	addPreparedEnvToServer(fc, trackVarsArray)
+	if len(fc.env) > 0 {
+		addPreparedEnvToServer(fc, trackVarsArray)
+	}
 }
 
 // splitCgiPath splits the request path into SCRIPT_NAME, SCRIPT_FILENAME, PATH_INFO, DOCUMENT_URI
@@ -285,13 +295,10 @@ func splitPos(path string, splitPath []string) int {
 	return -1
 }
 
-// go_update_request_info updates the sapi_request_info struct
+// updateRequestInfo fills the SAPI request_info struct from the current request context.
+// It returns the Authorization header (or nil if absent), as a pinned C string.
 // See: https://github.com/php/php-src/blob/345e04b619c3bc11ea17ee02cdecad6ae8ce5891/main/SAPI.h#L72
-//
-//export go_update_request_info
-func go_update_request_info(threadIndex C.uintptr_t, info *C.sapi_request_info) *C.char {
-	thread := phpThreads[threadIndex]
-	fc := thread.frankenPHPContext()
+func updateRequestInfo(thread *phpThread, fc *frankenPHPContext, info *C.sapi_request_info) *C.char {
 	request := fc.request
 
 	if request == nil {
@@ -324,6 +331,15 @@ func go_update_request_info(threadIndex C.uintptr_t, info *C.sapi_request_info) 
 	}
 
 	return thread.pinCString(authorizationHeader)
+}
+
+// go_update_request_info updates the sapi_request_info struct
+// Used by non-worker request paths.
+//
+//export go_update_request_info
+func go_update_request_info(threadIndex C.uintptr_t, info *C.sapi_request_info) *C.char {
+	thread := phpThreads[threadIndex]
+	return updateRequestInfo(thread, thread.frankenPHPContext(), info)
 }
 
 // SanitizedPathJoin performs filepath.Join(root, reqPath) that

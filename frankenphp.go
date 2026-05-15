@@ -64,7 +64,8 @@ var (
 	globalCtx    = context.Background()
 	globalLogger = slog.Default()
 
-	metrics Metrics = nullMetrics{}
+	metrics        Metrics = nullMetrics{}
+	metricsEnabled bool
 
 	maxWaitTime          time.Duration
 	maxRequestsPerThread int
@@ -273,6 +274,7 @@ func Init(options ...Option) error {
 
 	if opt.metrics != nil {
 		metrics = opt.metrics
+		metricsEnabled = true
 	}
 
 	maxWaitTime = opt.maxWaitTime
@@ -789,5 +791,7 @@ func resetGlobals() {
 	watcherIsEnabled = false
 	maxIdleTime = defaultMaxIdleTime
 	maxRequestsPerThread = 0
+	metrics = nullMetrics{}
+	metricsEnabled = false
 	globalMu.Unlock()
 }

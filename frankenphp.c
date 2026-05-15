@@ -228,6 +228,15 @@ static void frankenphp_update_request_context() {
   php_handle_auth_data(authorization_header);
 }
 
+/* worker variant: server_context and status are set; authorization header
+ * is provided by the combined start callback to avoid an extra cgo crossing */
+static void
+frankenphp_update_request_context_worker(char *authorization_header) {
+  SG(server_context) = (void *)1;
+  SG(sapi_headers).http_response_code = 200;
+  php_handle_auth_data(authorization_header);
+}
+
 static void frankenphp_free_request_context() {
   if (SG(request_info).cookie_data != NULL) {
     free(SG(request_info).cookie_data);
@@ -418,11 +427,19 @@ void get_full_env(zval *track_vars_array) {
   zend_hash_copy(Z_ARR_P(track_vars_array), main_thread_env, NULL);
 }
 
-/* Adapted from php_request_startup() */
-static int frankenphp_worker_request_startup() {
+/* Adapted from php_request_startup()
+ * If authorization_header is provided (worker fast path), it's used directly
+ * and the cgo callback to populate request_info is skipped. */
+static int
+frankenphp_worker_request_startup_internal(bool worker_fast_path,
+                                           char *authorization_header) {
   int retval = SUCCESS;
 
-  frankenphp_update_request_context();
+  if (worker_fast_path) {
+    frankenphp_update_request_context_worker(authorization_header);
+  } else {
+    frankenphp_update_request_context();
+  }
 
   zend_try {
     frankenphp_release_temporary_streams();
@@ -672,9 +689,13 @@ PHP_FUNCTION(frankenphp_handle_request) {
   zend_unset_timeout();
 #endif
 
+  /* Combined cgo callback: waits for next request AND populates
+   * SG(request_info) to avoid a second cgo crossing in the steady-state hot
+   * path. */
   struct go_frankenphp_worker_handle_request_start_return result =
-      go_frankenphp_worker_handle_request_start(thread_index);
-  if (frankenphp_worker_request_startup() == FAILURE
+      go_frankenphp_worker_handle_request_start(thread_index,
+                                                &SG(request_info));
+  if (frankenphp_worker_request_startup_internal(true, result.r2) == FAILURE
       /* Shutting down */
       || !result.r0) {
     RETURN_FALSE;

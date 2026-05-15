@@ -288,7 +288,9 @@ func (worker *worker) isAtThreadLimit() bool {
 }
 
 func (worker *worker) handleRequest(ch contextHolder) error {
-	metrics.StartWorkerRequest(worker.name)
+	if metricsEnabled {
+		metrics.StartWorkerRequest(worker.name)
+	}
 
 	runtime.Gosched()
 
@@ -300,7 +302,9 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 			case thread.requestChan <- ch:
 				worker.threadMutex.RUnlock()
 				<-ch.frankenPHPContext.done
-				metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+				if metricsEnabled {
+					metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+				}
 
 				return nil
 			default:
@@ -312,7 +316,9 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 
 	// if no thread was available, mark the request as queued and apply the scaling strategy
 	worker.queuedRequests.Add(1)
-	metrics.QueuedWorkerRequest(worker.name)
+	if metricsEnabled {
+		metrics.QueuedWorkerRequest(worker.name)
+	}
 
 	for {
 		workerScaleChan := scaleChan
@@ -323,9 +329,13 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 		select {
 		case worker.requestChan <- ch:
 			worker.queuedRequests.Add(-1)
-			metrics.DequeuedWorkerRequest(worker.name)
+			if metricsEnabled {
+				metrics.DequeuedWorkerRequest(worker.name)
+			}
 			<-ch.frankenPHPContext.done
-			metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+			if metricsEnabled {
+				metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+			}
 
 			return nil
 		case workerScaleChan <- ch.frankenPHPContext:
@@ -333,8 +343,10 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 		case <-timeoutChan(maxWaitTime):
 			// the request has timed out stalling
 			worker.queuedRequests.Add(-1)
-			metrics.DequeuedWorkerRequest(worker.name)
-			metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+			if metricsEnabled {
+				metrics.DequeuedWorkerRequest(worker.name)
+				metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+			}
 
 			ch.frankenPHPContext.reject(ErrMaxWaitTimeExceeded)
 
