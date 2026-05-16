@@ -93,6 +93,48 @@ __thread uintptr_t thread_index;
 __thread bool is_worker_thread = false;
 __thread HashTable *sandboxed_env = NULL;
 
+/* Per-thread staging area. The buffer is C-allocated so Go can fill it
+ * via direct memory writes; cgocheck only validates the outer pointer
+ * (which is C memory) on the commit call and never recurses into the
+ * header/env arrays. */
+static __thread frankenphp_prepared_state *prepared_state = NULL;
+
+frankenphp_prepared_state *frankenphp_alloc_prepared_state(void) {
+  frankenphp_prepared_state *s = calloc(1, sizeof(frankenphp_prepared_state));
+  return s;
+}
+
+void frankenphp_free_prepared_state(frankenphp_prepared_state *state) {
+  if (state == NULL) {
+    return;
+  }
+  if (state->cookie_data != NULL) {
+    free(state->cookie_data);
+  }
+  free(state);
+}
+
+void frankenphp_commit_prepared_data(uintptr_t thread_index_unused,
+                                     frankenphp_prepared_state *state) {
+  (void)thread_index_unused;
+  prepared_state = state;
+}
+
+void frankenphp_clear_prepared_data(uintptr_t thread_index_unused) {
+  (void)thread_index_unused;
+  if (prepared_state == NULL) {
+    return;
+  }
+  prepared_state->has_data = false;
+  /* cookie_data ownership: if it was set but never consumed by
+   * frankenphp_read_cookies, free it here. The cookie buffer is
+   * malloc'd in Go via C.CString. */
+  if (prepared_state->cookie_data != NULL) {
+    free(prepared_state->cookie_data);
+    prepared_state->cookie_data = NULL;
+  }
+}
+
 #ifndef PHP_WIN32
 static bool is_forked_child = false;
 static void frankenphp_fork_child(void) { is_forked_child = true; }
@@ -249,6 +291,15 @@ static void frankenphp_free_request_context() {
   SG(request_info).content_type = NULL;
   SG(request_info).path_translated = NULL;
   SG(request_info).request_uri = NULL;
+
+  /* Drop any staged worker data here as well. This path runs on the
+   * exit()/zend_bailout cleanup branch where frankenphp_worker_request_
+   * shutdown is skipped; without this clear, the next worker boot
+   * would observe has_data=true with pointers to freed request memory. */
+  if (prepared_state != NULL &&
+      (prepared_state->has_data || prepared_state->cookie_data != NULL)) {
+    frankenphp_clear_prepared_data(thread_index);
+  }
 }
 
 /* reset all 'auto globals' in worker mode except of $_ENV
@@ -990,6 +1041,13 @@ static size_t frankenphp_read_post(char *buffer, size_t count_bytes) {
 }
 
 static char *frankenphp_read_cookies(void) {
+  if (prepared_state != NULL && prepared_state->has_data) {
+    /* Cookie was pre-fetched by the worker start callback; PHP takes
+     * ownership and will free via the cookie_data path. */
+    char *cookie = prepared_state->cookie_data;
+    prepared_state->cookie_data = NULL;
+    return cookie;
+  }
   return go_read_cookies(thread_index);
 }
 
@@ -1165,8 +1223,30 @@ static void frankenphp_register_variables(zval *track_vars_array) {
    * $_SERVER and $_ENV should only contain values from the original
    * environment, not values added though putenv
    */
-  /* import environment and CGI variables from the request context in go */
-  go_register_server_variables(thread_index, track_vars_array);
+  if (prepared_state != NULL && prepared_state->has_data) {
+    /* Worker fast path: data was staged by the worker start callback
+     * (one cgo crossing). Consume it here in pure C - no callback
+     * back into Go. */
+    frankenphp_register_server_vars(track_vars_array, prepared_state->vars);
+    HashTable *ht = Z_ARRVAL_P(track_vars_array);
+    for (int i = 0; i < prepared_state->n_headers; i++) {
+      frankenphp_prepared_header *h = &prepared_state->headers[i];
+      if (h->known_key != NULL) {
+        frankenphp_register_trusted_var(h->known_key, h->val, h->val_len, ht);
+      } else {
+        frankenphp_register_variable_safe(h->raw_key, h->val, h->val_len,
+                                          track_vars_array);
+      }
+    }
+    for (int i = 0; i < prepared_state->n_env; i++) {
+      frankenphp_prepared_env *e = &prepared_state->env[i];
+      frankenphp_register_variable_safe(e->key, e->val, e->val_len,
+                                        track_vars_array);
+    }
+  } else {
+    /* import environment and CGI variables from the request context in go */
+    go_register_server_variables(thread_index, track_vars_array);
+  }
 
   /* Some variables are already present in SG(request_info) */
   frankenphp_register_variables_from_request_info(track_vars_array);

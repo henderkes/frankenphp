@@ -4,12 +4,18 @@ package frankenphp
 // #cgo nocallback frankenphp_register_variable_safe
 // #cgo nocallback frankenphp_register_known_variable
 // #cgo nocallback frankenphp_init_persistent_string
+// #cgo nocallback frankenphp_alloc_prepared_state
+// #cgo nocallback frankenphp_commit_prepared_data
+// #cgo nocallback frankenphp_clear_prepared_data
 // #cgo noescape frankenphp_register_server_vars
 // #cgo noescape frankenphp_register_variable_safe
 // #cgo noescape frankenphp_register_known_variable
 // #cgo noescape frankenphp_init_persistent_string
+// #cgo noescape frankenphp_commit_prepared_data
+// #cgo noescape frankenphp_clear_prepared_data
 // #include "frankenphp.h"
 // #include <php_variables.h>
+// #include <stdlib.h>
 import "C"
 import (
 	"context"
@@ -202,6 +208,96 @@ func go_register_server_variables(threadIndex C.uintptr_t, trackVarsArray *C.zva
 	if len(fc.env) > 0 {
 		addPreparedEnvToServer(fc, trackVarsArray)
 	}
+}
+
+// stagePreparedDataForWorker pre-builds the $_SERVER population and the
+// raw Cookie header on the Go side, then hands a flat C-compatible
+// view to the SAPI layer. This lets frankenphp_register_variables and
+// frankenphp_read_cookies run in pure C on the worker hot path,
+// trading two C->Go callbacks per request for a single Go->C call.
+//
+// All Go-string pointers stored in the staging structs are kept alive
+// for the duration of the request: header strings via fc.request,
+// env strings via fc.env (cleared after the request), uncommon header
+// keys via the phpheaders cache.
+func (thread *phpThread) stagePreparedDataForWorker(fc *frankenPHPContext) {
+	if fc.request == nil {
+		// extension worker (no HTTP request): make sure no stale state
+		// from a previous request is left around for the SAPI hooks.
+		C.frankenphp_clear_prepared_data(C.uintptr_t(thread.threadIndex))
+		return
+	}
+
+	st := thread.preparedState
+	st.vars = buildKnownVariablesForServer(fc)
+
+	// Direct pointer arithmetic into the C-allocated arrays - no slice
+	// header, no bounds check. Storing Go-pointer fields in C memory
+	// bypasses cgocheck=1 (the outer pointer is C memory; the check
+	// does not recurse). Strings stay reachable via fc.request /
+	// preparedKeepAlive until the request finishes.
+	const headerSz = unsafe.Sizeof(C.frankenphp_prepared_header{})
+	const envSz = unsafe.Sizeof(C.frankenphp_prepared_env{})
+	headersBase := unsafe.Pointer(&st.headers[0])
+	envBase := unsafe.Pointer(&st.env[0])
+	keepAlive := thread.preparedKeepAlive[:0]
+	ctx := thread.context()
+
+	n := uintptr(0)
+	for field, val := range fc.request.Header {
+		if n == C.FRANKENPHP_PREPARED_HEADERS_CAP {
+			C.frankenphp_clear_prepared_data(C.uintptr_t(thread.threadIndex))
+			return
+		}
+		v := strings.Join(val, ", ")
+		h := (*C.frankenphp_prepared_header)(unsafe.Add(headersBase, n*headerSz))
+		if k := commonHeaders[field]; k != nil {
+			h.known_key = k
+			h.raw_key = nil
+		} else {
+			rawKey := phpheaders.GetUnCommonHeader(ctx, field)
+			h.known_key = nil
+			h.raw_key = toUnsafeChar(rawKey)
+			h.raw_key_len = C.size_t(len(rawKey))
+		}
+		h.val = toUnsafeChar(v)
+		h.val_len = C.size_t(len(v))
+		if len(val) > 1 {
+			keepAlive = append(keepAlive, v)
+		}
+		n++
+	}
+	st.n_headers = C.int(n)
+
+	m := uintptr(0)
+	for k, v := range fc.env {
+		if m == C.FRANKENPHP_PREPARED_ENV_CAP {
+			C.frankenphp_clear_prepared_data(C.uintptr_t(thread.threadIndex))
+			return
+		}
+		e := (*C.frankenphp_prepared_env)(unsafe.Add(envBase, m*envSz))
+		e.key = toUnsafeChar(k)
+		e.key_len = C.size_t(len(k))
+		e.val = toUnsafeChar(v)
+		e.val_len = C.size_t(len(v))
+		m++
+	}
+	st.n_env = C.int(m)
+
+	st.cookie_data = nil
+	if cookies := fc.request.Header.Values("Cookie"); len(cookies) > 0 {
+		cookie := strings.Join(cookies, "; ")
+		if strings.IndexByte(cookie, 0) >= 0 {
+			cookie = strings.ReplaceAll(cookie, "\x00", "")
+		}
+		if cookie != "" {
+			st.cookie_data = C.CString(cookie)
+		}
+	}
+
+	st.has_data = true
+	thread.preparedKeepAlive = keepAlive
+	C.frankenphp_commit_prepared_data(C.uintptr_t(thread.threadIndex), st)
 }
 
 // splitCgiPath splits the request path into SCRIPT_NAME, SCRIPT_FILENAME, PATH_INFO, DOCUMENT_URI

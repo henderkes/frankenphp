@@ -32,6 +32,12 @@ type phpThread struct {
 	// ts_free_thread.
 	forceKillMu sync.RWMutex
 	forceKill   C.force_kill_slot
+	// C-allocated staging buffer for the worker hot path; lives for
+	// the thread's lifetime. preparedKeepAlive holds Go strings (joined
+	// multi-value headers) referenced by pointer from C and must stay
+	// rooted until the request finishes.
+	preparedState     *C.frankenphp_prepared_state
+	preparedKeepAlive []string
 }
 
 // threadHandler defines how the callbacks from the C thread should be handled
@@ -51,9 +57,11 @@ type threadHandler interface {
 
 func newPHPThread(threadIndex int) *phpThread {
 	return &phpThread{
-		threadIndex: threadIndex,
-		requestChan: make(chan contextHolder),
-		state:       state.NewThreadState(),
+		threadIndex:       threadIndex,
+		requestChan:       make(chan contextHolder),
+		state:             state.NewThreadState(),
+		preparedState:     C.frankenphp_alloc_prepared_state(),
+		preparedKeepAlive: make([]string, 0, 192),
 	}
 }
 

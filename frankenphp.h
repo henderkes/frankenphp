@@ -187,6 +187,53 @@ typedef struct frankenphp_config {
 } frankenphp_config;
 frankenphp_config frankenphp_get_config();
 
+/* Pre-staged per-request data. Populated from Go inside the worker
+ * start callback (one cgo crossing) and consumed by the SAPI hooks in
+ * pure C, eliminating the C->Go callback that fires on every $_SERVER
+ * / cookie read in the worker hot path.
+ *
+ * Backing storage is C-allocated (see frankenphp_prepared_state below)
+ * so Go can write pointer fields directly without tripping the cgo
+ * pointer check on every request (the outer pointer it passes through
+ * cgo is C memory, and cgocheck=1 does not recurse). */
+typedef struct frankenphp_prepared_header {
+  /* known_key non-NULL: register under that interned key (fast, no
+   * filtering). known_key NULL: use raw_key (subject to filtering). */
+  zend_string *known_key;
+  char *raw_key;
+  size_t raw_key_len;
+  char *val;
+  size_t val_len;
+} frankenphp_prepared_header;
+
+typedef struct frankenphp_prepared_env {
+  char *key;
+  size_t key_len;
+  char *val;
+  size_t val_len;
+} frankenphp_prepared_env;
+
+#define FRANKENPHP_PREPARED_HEADERS_CAP 96
+#define FRANKENPHP_PREPARED_ENV_CAP 64
+
+typedef struct frankenphp_prepared_state {
+  bool has_data;
+  frankenphp_server_vars vars;
+  int n_headers;
+  int n_env;
+  char *cookie_data;
+  frankenphp_prepared_header headers[FRANKENPHP_PREPARED_HEADERS_CAP];
+  frankenphp_prepared_env env[FRANKENPHP_PREPARED_ENV_CAP];
+} frankenphp_prepared_state;
+
+/* Allocate (one-shot) and return this thread's prepared-state buffer
+ * so Go can write directly into it. */
+frankenphp_prepared_state *frankenphp_alloc_prepared_state(void);
+void frankenphp_free_prepared_state(frankenphp_prepared_state *state);
+void frankenphp_commit_prepared_data(uintptr_t thread_index,
+                                     frankenphp_prepared_state *state);
+void frankenphp_clear_prepared_data(uintptr_t thread_index);
+
 int frankenphp_new_main_thread(int num_threads);
 bool frankenphp_new_php_thread(uintptr_t thread_index);
 

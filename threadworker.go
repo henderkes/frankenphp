@@ -318,6 +318,10 @@ func go_frankenphp_worker_handle_request_start(threadIndex C.uintptr_t, info *C.
 	fc := handler.workerFrankenPHPContext
 	authHeader := updateRequestInfo(thread, fc, info)
 
+	// Stage server vars, headers, env and cookie for the SAPI hooks
+	// so they can run in pure C (no callback back into Go).
+	thread.stagePreparedDataForWorker(fc)
+
 	return C.bool(true), ptr, authHeader
 }
 
