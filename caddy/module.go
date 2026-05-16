@@ -525,11 +525,9 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 		// route to redirect to canonical path if index PHP file
 		if dirRedir {
 			redirMatcherSet := caddy.ModuleMap{
-				"frankenphp_file": h.JSON(MatchFileCached{
-					MatchFile: fileserver.MatchFile{
-						TryFiles: []string{dirIndex},
-						Root:     phpsrv.Root,
-					},
+				"file": h.JSON(fileserver.MatchFile{
+					TryFiles: []string{dirIndex},
+					Root:     phpsrv.Root,
 				}),
 				"not": h.JSON(caddyhttp.MatchNot{
 					MatcherSetsRaw: []caddy.ModuleMap{
@@ -553,13 +551,11 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 
 		// route to rewrite to PHP index file
 		rewriteMatcherSet := caddy.ModuleMap{
-			"frankenphp_file": h.JSON(MatchFileCached{
-				MatchFile: fileserver.MatchFile{
-					TryFiles:  tryFiles,
-					TryPolicy: tryPolicy,
-					SplitPath: extensions,
-					Root:      phpsrv.Root,
-				},
+			"file": h.JSON(fileserver.MatchFile{
+				TryFiles:  tryFiles,
+				TryPolicy: tryPolicy,
+				SplitPath: extensions,
+				Root:      phpsrv.Root,
 			}),
 		}
 		rewriteHandler := rewrite.Rewrite{
