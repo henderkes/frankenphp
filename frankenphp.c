@@ -279,7 +279,15 @@ frankenphp_update_request_context_worker(char *authorization_header) {
   php_handle_auth_data(authorization_header);
 }
 
+static void frankenphp_flush_pending_headers(void);
+
 static void frankenphp_free_request_context() {
+  /* Flush any headers stashed by frankenphp_send_headers but never
+   * paired with a body write (HEAD requests, 304s, exit() before any
+   * echo, etc.). Without this, those responses would lose their
+   * headers because the SAPI hook deferred the cgo call. */
+  frankenphp_flush_pending_headers();
+
   if (SG(request_info).cookie_data != NULL) {
     free(SG(request_info).cookie_data);
     SG(request_info).cookie_data = NULL;
@@ -993,7 +1001,47 @@ static int frankenphp_startup(sapi_module_struct *sapi_module) {
 
 static int frankenphp_deactivate(void) { return SUCCESS; }
 
+/* Pending response headers - when the SAPI calls send_headers we stash
+ * status + the headers list and defer the actual cgo callback until
+ * the first ub_write, then issue a single combined cgo call. This
+ * cuts one C->Go crossing per request out of the hot path for any
+ * response that has both headers and a body (i.e. virtually all of
+ * them). If a request ends without ever writing a body (304 / HEAD /
+ * exit() before output), the deferred header send is flushed from
+ * frankenphp_worker_request_shutdown / frankenphp_free_request_context. */
+typedef struct frankenphp_pending_headers {
+  bool pending;
+  int status;
+  zend_llist *headers; /* borrowed from sapi_headers; valid until SAPI
+                          deactivate */
+} frankenphp_pending_headers;
+
+static __thread frankenphp_pending_headers pending_headers;
+
+static void frankenphp_flush_pending_headers(void) {
+  if (!pending_headers.pending) {
+    return;
+  }
+  pending_headers.pending = false;
+  go_write_headers(thread_index, pending_headers.status, pending_headers.headers);
+  pending_headers.headers = NULL;
+}
+
 static size_t frankenphp_ub_write(const char *str, size_t str_length) {
+  if (pending_headers.pending) {
+    int status = pending_headers.status;
+    zend_llist *headers = pending_headers.headers;
+    pending_headers.pending = false;
+    pending_headers.headers = NULL;
+    struct go_write_headers_and_body_return result =
+        go_write_headers_and_body(thread_index, status, headers, (char *)str,
+                                  str_length);
+    if (result.r1) {
+      php_handle_aborted_connection();
+    }
+    return result.r0;
+  }
+
   struct go_ub_write_return result =
       go_ub_write(thread_index, (char *)str, str_length);
 
@@ -1021,16 +1069,28 @@ static int frankenphp_send_headers(sapi_headers_struct *sapi_headers) {
     }
   }
 
-  bool success = go_write_headers(thread_index, status, &sapi_headers->headers);
-  if (success) {
-    return SAPI_HEADER_SENT_SUCCESSFULLY;
+  /* 1xx (informational) responses need to hit the wire immediately
+   * - Early Hints (103) etc. are followed by the final response and
+   * its body, so we can't bundle them with the next ub_write. Send
+   * directly via the original cgo callback. */
+  if (status >= 100 && status < 200) {
+    bool success =
+        go_write_headers(thread_index, status, &sapi_headers->headers);
+    return success ? SAPI_HEADER_SENT_SUCCESSFULLY : SAPI_HEADER_SEND_FAILED;
   }
 
-  return SAPI_HEADER_SEND_FAILED;
+  /* Stash for combined dispatch with the first ub_write. If no body
+   * write follows, the pending headers are flushed at request
+   * shutdown. */
+  pending_headers.pending = true;
+  pending_headers.status = status;
+  pending_headers.headers = &sapi_headers->headers;
+  return SAPI_HEADER_SENT_SUCCESSFULLY;
 }
 
 static void frankenphp_sapi_flush(void *server_context) {
   sapi_send_headers();
+  frankenphp_flush_pending_headers();
   if (go_sapi_flush(thread_index)) {
     php_handle_aborted_connection();
   }

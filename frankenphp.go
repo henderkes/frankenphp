@@ -429,7 +429,13 @@ func ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) error 
 func go_ub_write(threadIndex C.uintptr_t, cBuf *C.char, length C.size_t) (C.size_t, C.bool) {
 	thread := phpThreads[threadIndex]
 	fc := thread.frankenPHPContext()
+	return goUbWrite(thread, fc, cBuf, length)
+}
 
+// goUbWrite is the body of the SAPI ub_write hook, factored out so
+// the combined go_write_headers_and_body cgo callback can reuse it
+// without going through cgo a second time.
+func goUbWrite(thread *phpThread, fc *frankenPHPContext, cBuf *C.char, length C.size_t) (C.size_t, C.bool) {
 	if fc.isDone {
 		return 0, C.bool(true)
 	}
@@ -558,14 +564,21 @@ func go_write_headers(threadIndex C.uintptr_t, status C.int, headers *C.zend_lli
 	if fc == nil {
 		return C.bool(false)
 	}
+	return C.bool(writeHeaders(thread, fc, int(status), headers))
+}
 
+// writeHeaders is the body of go_write_headers, factored out so the
+// combined go_write_headers_and_body cgo callback can reuse it.
+// Returns true if the caller should treat the send as successful
+// (mirrors the original SAPI return value semantics).
+func writeHeaders(thread *phpThread, fc *frankenPHPContext, status int, headers *C.zend_llist) bool {
 	if fc.isDone {
-		return C.bool(false)
+		return false
 	}
 
 	if fc.responseWriter == nil {
 		// probably starting a worker script, pretend we wrote headers so PHP still calls ub_write
-		return C.bool(true)
+		return true
 	}
 
 	current := headers.head
@@ -576,23 +589,21 @@ func go_write_headers(threadIndex C.uintptr_t, status C.int, headers *C.zend_lli
 		current = current.next
 	}
 
-	goStatus := int(status)
-
 	// go panics on invalid status code
 	// https://github.com/golang/go/blob/9b8742f2e79438b9442afa4c0a0139d3937ea33f/src/net/http/server.go#L1162
-	if goStatus < 100 || goStatus > 999 {
+	if status < 100 || status > 999 {
 		ctx := thread.context()
 
 		if globalLogger.Enabled(ctx, slog.LevelWarn) {
-			globalLogger.LogAttrs(ctx, slog.LevelWarn, "Invalid response status code", slog.Int("status_code", goStatus))
+			globalLogger.LogAttrs(ctx, slog.LevelWarn, "Invalid response status code", slog.Int("status_code", status))
 		}
 
-		goStatus = 500
+		status = 500
 	}
 
-	fc.responseWriter.WriteHeader(goStatus)
+	fc.responseWriter.WriteHeader(status)
 
-	if goStatus < 200 {
+	if status < 200 {
 		// Clear headers, it's not automatically done by ResponseWriter.WriteHeader() for 1xx responses
 		h := fc.responseWriter.Header()
 		for k := range h {
@@ -600,7 +611,25 @@ func go_write_headers(threadIndex C.uintptr_t, status C.int, headers *C.zend_lli
 		}
 	}
 
-	return C.bool(true)
+	return true
+}
+
+// go_write_headers_and_body collapses a SAPI send_headers + ub_write
+// pair into one cgo callback. The C SAPI hook defers send_headers
+// until the first ub_write and then calls this combined entry, saving
+// one C->Go crossing per request on the worker hot path. Returns
+// (bytes_written, client_closed) mirroring go_ub_write.
+//
+//export go_write_headers_and_body
+func go_write_headers_and_body(threadIndex C.uintptr_t, status C.int,
+	headers *C.zend_llist, cBuf *C.char, length C.size_t) (C.size_t, C.bool) {
+	thread := phpThreads[threadIndex]
+	fc := thread.frankenPHPContext()
+	if fc == nil {
+		return 0, C.bool(true)
+	}
+	writeHeaders(thread, fc, int(status), headers)
+	return goUbWrite(thread, fc, cBuf, length)
 }
 
 //export go_sapi_flush
