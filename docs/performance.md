@@ -55,6 +55,15 @@ original parent is automatically forwarded to the workers.
 FRANKENPHP_NTS_WORKERS=4 frankenphp run
 ```
 
+On NTS builds, FrankenPHP also clears `EG(stack_limit)` after every `php_request_startup()`.
+The PHP runs as a `cgo`-callback on Go's M (system) stack rather than a pthread, so Zend's
+auto-detected stack base is wildly out of step with the address the VM is actually running
+at; without this clear, every script aborts with `Maximum call stack size of N bytes reached`
+on the first opcode. The trade-off is that genuine PHP-side stack overflows (deep recursion)
+will crash the worker process with `SIGSEGV` instead of raising a PHP `Fatal error`. The
+forked sibling workers absorb the lost capacity and the kernel keeps routing connections to
+the survivors.
+
 Constraints:
 
 - POSIX only (Linux, macOS, FreeBSD). The variable is ignored on Windows.

@@ -1385,6 +1385,19 @@ static void *php_thread(void *arg) {
         zend_bailout();
       }
 
+#ifndef ZTS
+      /* On NTS builds the PHP thread is a Go-managed goroutine whose
+       * "C stack" is Go's M (system) stack, not a pthread. PHP's
+       * auto-detected EG(stack_base)/EG(stack_limit) reflect the
+       * pthread we happen to be on, which can be wildly out of step
+       * with the actual address the Zend engine is running at - the
+       * VM's overflow check then fires on the very first opcode of
+       * trivial scripts ("Maximum call stack size of N bytes reached").
+       * Clearing stack_limit disables the check; zend_call_stack_overflowed
+       * is a guarded comparison that returns false on NULL. */
+      EG(stack_limit) = NULL;
+#endif
+
       zend_file_handle file_handle;
       zend_stream_init_filename(&file_handle, scriptName);
 
