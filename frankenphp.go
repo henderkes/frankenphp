@@ -306,8 +306,15 @@ func Init(options ...Option) error {
 	} else {
 		opt.numThreads = 1
 
-		if globalLogger.Enabled(globalCtx, slog.LevelWarn) {
-			globalLogger.LogAttrs(globalCtx, slog.LevelWarn, `ZTS is not enabled, only 1 thread will be available, recompile PHP using the "--enable-zts" configuration option or performance will be degraded`)
+		ntsWorkerCount, ntsWorkerIndex := initNTSPrefork()
+		if ntsWorkerCount == 0 {
+			if globalLogger.Enabled(globalCtx, slog.LevelWarn) {
+				globalLogger.LogAttrs(globalCtx, slog.LevelWarn, `ZTS is not enabled, only 1 thread will be available, recompile PHP using the "--enable-zts" configuration option, or set FRANKENPHP_NTS_WORKERS=N before starting to scale across N processes (SO_REUSEPORT)`)
+			}
+		} else if globalLogger.Enabled(globalCtx, slog.LevelInfo) {
+			globalLogger.LogAttrs(globalCtx, slog.LevelInfo, "NTS PHP pre-fork worker",
+				slog.Int("worker_index", ntsWorkerIndex),
+				slog.Int("worker_count", ntsWorkerCount))
 		}
 	}
 

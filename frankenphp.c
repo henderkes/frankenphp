@@ -102,6 +102,121 @@ static void frankenphp_register_atfork(void) {
 }
 #endif
 
+/* NTS pre-fork worker pool.
+ *
+ * When PHP is built without ZTS, libphp's global state is per-process,
+ * so a single FrankenPHP process can only run one PHP thread. To scale
+ * NTS PHP across CPUs we fork the entire FrankenPHP process N times at
+ * startup. Each child becomes an independent FrankenPHP instance with
+ * its own Go runtime, its own Caddy, and its own single-threaded libphp;
+ * they all bind the listener with SO_REUSEPORT (Caddy enables this by
+ * default on Linux/FreeBSD) and the kernel load-balances incoming
+ * connections between them.
+ *
+ * The fork is done in a C constructor so it runs before the Go runtime
+ * spawns its scheduler threads - forking after Go is up corrupts the
+ * scheduler (only the calling thread survives). Constructors run during
+ * dynamic linker init, before main(), which is before Go's rt0_go.
+ *
+ * Opt-in via the FRANKENPHP_NTS_WORKERS environment variable. With ZTS
+ * builds the variable is ignored - ZTS scales via threads in a single
+ * process. */
+#if !defined(ZTS) && !defined(PHP_WIN32)
+static int nts_worker_index = 0;
+static int nts_worker_count = 0;
+static int nts_num_children = 0;
+static pid_t *nts_child_pids = NULL;
+
+__attribute__((constructor)) static void frankenphp_nts_prefork(void) {
+  const char *env = getenv("FRANKENPHP_NTS_WORKERS");
+  if (env == NULL || *env == '\0') {
+    return;
+  }
+
+  char *end;
+  errno = 0;
+  long n = strtol(env, &end, 10);
+  if (errno != 0 || *end != '\0' || n <= 1 || n > 1024) {
+    if (n != 1) {
+      fprintf(stderr,
+              "FrankenPHP: ignoring FRANKENPHP_NTS_WORKERS=%s (must be an "
+              "integer between 2 and 1024)\n",
+              env);
+    }
+    return;
+  }
+
+  nts_worker_count = (int)n;
+  nts_num_children = (int)n - 1;
+
+  pid_t *pids = calloc((size_t)nts_num_children, sizeof(pid_t));
+  if (pids == NULL) {
+    fprintf(stderr, "FrankenPHP: failed to allocate NTS child PID table\n");
+    nts_worker_count = 0;
+    nts_num_children = 0;
+    return;
+  }
+
+  /* Drain stdio so the fork doesn't duplicate buffered output. */
+  fflush(stdout);
+  fflush(stderr);
+
+  for (int i = 0; i < nts_num_children; i++) {
+    pid_t pid = fork();
+    if (pid < 0) {
+      perror("FrankenPHP: fork failed during NTS pre-fork");
+      for (int j = 0; j < i; j++) {
+        if (pids[j] > 0) {
+          kill(pids[j], SIGTERM);
+        }
+      }
+      free(pids);
+      _exit(1);
+    }
+    if (pid == 0) {
+      /* Child: become worker (i+1). The child returns from the
+       * constructor and proceeds with its own copy of the binary. */
+      nts_worker_index = i + 1;
+      free(pids);
+      return;
+    }
+    pids[i] = pid;
+  }
+
+  /* Parent (worker 0) keeps the PID table; Go-side reads it via
+   * frankenphp_get_nts_child_pid to forward SIGTERM/SIGINT. */
+  nts_child_pids = pids;
+}
+#endif
+
+int frankenphp_get_nts_worker_index(void) {
+#if !defined(ZTS) && !defined(PHP_WIN32)
+  return nts_worker_index;
+#else
+  return 0;
+#endif
+}
+
+int frankenphp_get_nts_worker_count(void) {
+#if !defined(ZTS) && !defined(PHP_WIN32)
+  return nts_worker_count;
+#else
+  return 0;
+#endif
+}
+
+intptr_t frankenphp_get_nts_child_pid(int i) {
+#if !defined(ZTS) && !defined(PHP_WIN32)
+  if (i < 0 || i >= nts_num_children || nts_child_pids == NULL) {
+    return 0;
+  }
+  return (intptr_t)nts_child_pids[i];
+#else
+  (void)i;
+  return 0;
+#endif
+}
+
 /* Best-effort force-kill for stuck PHP threads.
  *
  * Each thread captures &EG(vm_interrupt) / &EG(timed_out) at boot and

@@ -37,6 +37,39 @@ Enabling [the FrankenPHP worker mode](worker.md) dramatically improves performan
 but your app must be adapted to be compatible with this mode:
 you need to create a worker script and to be sure that the app is not leaking memory.
 
+## Scaling NTS builds with a pre-fork worker pool
+
+FrankenPHP needs the [ZTS (Zend Thread Safe)](compile.md) build of PHP to run multiple PHP threads
+inside a single process. When `libphp.so` is built without ZTS (NTS), the embedded PHP runtime
+is per-process and FrankenPHP would otherwise be limited to a single PHP thread.
+
+To scale an NTS build across CPUs, set the `FRANKENPHP_NTS_WORKERS` environment variable
+before starting the server. A C constructor reads the variable before the Go runtime starts
+and forks the FrankenPHP process N times. Each forked process is a fully independent
+FrankenPHP instance with its own Caddy and its own single-threaded `libphp`; they all bind
+the listener with `SO_REUSEPORT` (Caddy enables this by default on Linux and FreeBSD) so the
+kernel load-balances incoming TCP connections between them. SIGTERM/SIGINT delivered to the
+original parent is automatically forwarded to the workers.
+
+```console
+FRANKENPHP_NTS_WORKERS=4 frankenphp run
+```
+
+Constraints:
+
+- POSIX only (Linux, macOS, FreeBSD). The variable is ignored on Windows.
+- Ignored on ZTS builds — use the regular `num_threads` configuration instead.
+- Each forked process is independent: per-process caches (OPcache, APCu) are not shared,
+  and Caddy's admin endpoint will be bound by whichever worker the kernel picks. If you need
+  a dedicated admin endpoint, point it at a different port per worker or disable it on all
+  but one.
+- Worker scripts and `num_threads > 1` per-process are not supported under pre-fork — each
+  process has one PHP thread, so they conflict with worker-script configurations that
+  require additional threads.
+
+ZTS remains the recommended deployment mode for CPU-bound workloads; pre-fork is the
+fallback when ZTS is not available (e.g. distribution packages that ship NTS only).
+
 ## Avoid musl in production: prefer glibc builds
 
 The Alpine Linux variant of the official Docker images and the default binaries we provide are using [the musl libc](https://musl.libc.org).

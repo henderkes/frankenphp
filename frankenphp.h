@@ -190,6 +190,19 @@ frankenphp_config frankenphp_get_config();
 int frankenphp_new_main_thread(int num_threads);
 bool frankenphp_new_php_thread(uintptr_t thread_index);
 
+/* NTS pre-fork pool accessors. When FRANKENPHP_NTS_WORKERS is set on
+ * an NTS build, a C constructor forks the process N times before Go
+ * starts; these accessors expose the resulting layout to Go.
+ *   - frankenphp_get_nts_worker_count: total workers (incl. worker 0).
+ *     0 if pre-fork is inactive (ZTS, Windows, env unset, single worker).
+ *   - frankenphp_get_nts_worker_index: 0 for the original parent,
+ *     1..count-1 for forked children.
+ *   - frankenphp_get_nts_child_pid: child PID at index i (parent only;
+ *     returns 0 in children or for out-of-range i). */
+int frankenphp_get_nts_worker_index(void);
+int frankenphp_get_nts_worker_count(void);
+intptr_t frankenphp_get_nts_child_pid(int i);
+
 bool frankenphp_shutdown_dummy_request(void);
 void frankenphp_update_local_thread_context(bool is_worker);
 
