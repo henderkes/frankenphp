@@ -282,20 +282,15 @@ func Init(options ...Option) error {
 		maxIdleTime = opt.maxIdleTime
 	}
 
-	workerThreadCount, err := calculateMaxThreads(opt)
-	if err != nil {
-		Shutdown()
-		return err
-	}
-
-	metrics.TotalThreads(opt.numThreads)
-
 	config := Config()
 
 	if config.Version.MajorVersion < 8 || (config.Version.MajorVersion == 8 && config.Version.MinorVersion < 2) {
 		Shutdown()
 		return ErrInvalidPHPVersion
 	}
+
+	var workerThreadCount int
+	ntsSingleWorker := false
 
 	if config.ZTS {
 		if !config.ZendMaxExecutionTimers && runtime.GOOS == "linux" {
@@ -304,8 +299,6 @@ func Init(options ...Option) error {
 			}
 		}
 	} else {
-		opt.numThreads = 1
-
 		ntsWorkerCount, ntsWorkerIndex := initNTSPrefork()
 		if ntsWorkerCount == 0 {
 			if globalLogger.Enabled(globalCtx, slog.LevelWarn) {
@@ -316,7 +309,60 @@ func Init(options ...Option) error {
 				slog.Int("worker_index", ntsWorkerIndex),
 				slog.Int("worker_count", ntsWorkerCount))
 		}
+
+		// Under NTS each process has one PHP thread. If the user has a
+		// worker configured, that thread IS the worker (no room for a
+		// regular thread on the side). The Caddy module can register
+		// the same worker file under multiple module-prefixed names
+		// (e.g. m#/path and m#/path_0) when a php_server block declares
+		// its worker; collapse those down by filename so a single
+		// underlying script counts once. Distinct files cannot share
+		// one thread, so reject. The user controls pool-wide scale via
+		// FRANKENPHP_NTS_WORKERS rather than the worker's own `num`,
+		// which we clamp to 1.
+		uniqueFiles := make(map[string]int, len(opt.workers))
+		for i, w := range opt.workers {
+			if _, seen := uniqueFiles[w.fileName]; !seen {
+				uniqueFiles[w.fileName] = i
+			}
+		}
+		if len(uniqueFiles) > 1 {
+			names := make([]string, 0, len(opt.workers))
+			for _, w := range opt.workers {
+				names = append(names, fmt.Sprintf("%s=%s(num=%d)", w.name, w.fileName, w.num))
+			}
+			Shutdown()
+			return fmt.Errorf("NTS PHP supports at most one worker script per process (got %d distinct file(s): %v); scale via FRANKENPHP_NTS_WORKERS instead", len(uniqueFiles), names)
+		}
+		if len(uniqueFiles) == 1 {
+			// Keep only the first occurrence; drop any duplicates so
+			// initWorkers doesn't try to spawn two threads for what
+			// is the same underlying script.
+			var keepIdx int
+			for _, idx := range uniqueFiles {
+				keepIdx = idx
+			}
+			opt.workers = []workerOpt{opt.workers[keepIdx]}
+			opt.workers[0].num = 1
+			opt.workers[0].maxThreads = 1
+			metrics.TotalWorkers(opt.workers[0].name, 1)
+			ntsSingleWorker = true
+			workerThreadCount = 1
+		}
+		opt.numThreads = 1
+		opt.maxThreads = 1
 	}
+
+	if !ntsSingleWorker {
+		var err error
+		workerThreadCount, err = calculateMaxThreads(opt)
+		if err != nil {
+			Shutdown()
+			return err
+		}
+	}
+
+	metrics.TotalThreads(opt.numThreads)
 
 	mainThread, err := initPHPThreads(opt.numThreads, opt.maxThreads, opt.phpIni)
 	if err != nil {
