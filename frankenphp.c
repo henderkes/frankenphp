@@ -1292,6 +1292,21 @@ static void *php_thread(void *arg) {
 
       has_attempted_shutdown = true;
 
+#ifdef HAVE_PHP_SESSION
+      /* Bailout inside a user save handler leaves PS(in_save_handler) set,
+       * which makes RSHUTDOWN skip both s_write and s_close paths and leaks
+       * the underlying flock inside this Go process (#2368). Force the
+       * default mod's s_close while PS state is still consistent, and
+       * neutralize any further user-handler dispatch. */
+      if (PS(in_save_handler) && PS(default_mod) && PS(mod_data)) {
+        PS(in_save_handler) = 0;
+        zend_try { PS(default_mod)->s_close(&PS(mod_data)); }
+        zend_catch {}
+        zend_end_try();
+        PS(mod_user_implemented) = 0;
+      }
+#endif
+
       /* shutdown the request, potential bailout to zend_catch */
       php_request_shutdown((void *)0);
       frankenphp_free_request_context();
