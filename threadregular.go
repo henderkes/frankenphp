@@ -157,6 +157,10 @@ func handleRequestWithRegularPHPThreads(ch contextHolder) error {
 	}
 
 	// if no thread was available, mark the request as queued and fan it out to all threads
+	if ch.frankenPHPContext.startedAt.IsZero() {
+		// stamp lazily so the autoscaling stall check works when metrics are disabled
+		ch.frankenPHPContext.startedAt = time.Now()
+	}
 	queuedRegularThreads.Add(1)
 	metrics.QueuedRequest()
 

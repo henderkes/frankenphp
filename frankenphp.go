@@ -66,6 +66,9 @@ var (
 	globalLogger = slog.Default()
 
 	metrics Metrics = nullMetrics{}
+	// true when a real (non-null) metrics collector is configured; lets hot
+	// paths skip time.Now()/time.Since() calls that only feed metrics
+	metricsEnabled bool
 
 	// atomic: read by in-flight requests while a reload may rewrite it
 	maxWaitTime          atomic.Int64
@@ -276,6 +279,8 @@ func Init(options ...Option) error {
 	if opt.metrics != nil {
 		metrics = opt.metrics
 	}
+	_, hasNullMetrics := metrics.(nullMetrics)
+	metricsEnabled = !hasNullMetrics
 
 	maxWaitTime.Store(int64(opt.maxWaitTime))
 	maxRequestsPerThread = opt.maxRequests
