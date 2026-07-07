@@ -139,18 +139,15 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 		ResolveRootSymlink: &rrs,
 	}
 
-	// route to redirect to canonical path if index PHP file
+	// route to redirect to canonical path if index PHP file;
+	// the custom matcher is equivalent to {file {path}/<index>} + {not path */}
+	// but skips the filesystem probe for paths ending in "/" or in a
+	// PHP split extension (see MatchDirIndex)
 	redirMatcherSet := caddy.ModuleMap{
-		"file": caddyconfig.JSON(fileserver.MatchFile{
-			Root:     root,
-			TryFiles: []string{"{http.request.uri.path}/" + indexFile},
-		}, nil),
-		"not": caddyconfig.JSON(caddyhttp.MatchNot{
-			MatcherSetsRaw: []caddy.ModuleMap{
-				{
-					"path": caddyconfig.JSON(caddyhttp.MatchPath{"*/"}, nil),
-				},
-			},
+		"php_dir_index": caddyconfig.JSON(MatchDirIndex{
+			Root:      root,
+			Index:     indexFile,
+			SplitPath: extensions,
 		}, nil),
 	}
 	redirHandler := caddyhttp.StaticResponse{

@@ -19,6 +19,7 @@ func init() {
 	caddy.RegisterModule(FrankenPHPApp{})
 	caddy.RegisterModule(FrankenPHPModule{})
 	caddy.RegisterModule(FrankenPHPAdmin{})
+	caddy.RegisterModule(MatchDirIndex{})
 
 	httpcaddyfile.RegisterGlobalOption("frankenphp", parseGlobalOption)
 

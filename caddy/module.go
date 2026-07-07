@@ -535,19 +535,16 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 			}
 		}
 
-		// route to redirect to canonical path if index PHP file
+		// route to redirect to canonical path if index PHP file;
+		// the custom matcher is equivalent to {file {path}/<index>} + {not path */}
+		// but skips the filesystem probe for paths ending in "/" or in a
+		// PHP split extension (see MatchDirIndex)
 		if dirRedir {
 			redirMatcherSet := caddy.ModuleMap{
-				"file": h.JSON(fileserver.MatchFile{
-					TryFiles: []string{dirIndex},
-					Root:     phpsrv.Root,
-				}),
-				"not": h.JSON(caddyhttp.MatchNot{
-					MatcherSetsRaw: []caddy.ModuleMap{
-						{
-							"path": h.JSON(caddyhttp.MatchPath{"*/"}),
-						},
-					},
+				"php_dir_index": h.JSON(MatchDirIndex{
+					Root:      phpsrv.Root,
+					Index:     indexFile,
+					SplitPath: extensions,
 				}),
 			}
 			redirHandler := caddyhttp.StaticResponse{
