@@ -249,9 +249,16 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 	worker.queuedRequests.Add(1)
 	metrics.QueuedWorkerRequest(worker.name)
 
+	// skip the scaling case entirely if the upscaler is not running
+	// (nil channel: the case is never selected)
+	sc := scaleChan
+	if !upscalingEnabled.Load() {
+		sc = nil
+	}
+
 	for {
-		workerScaleChan := scaleChan
-		if worker.isAtThreadLimit() {
+		workerScaleChan := sc
+		if workerScaleChan != nil && worker.isAtThreadLimit() {
 			workerScaleChan = nil // max_threads for this worker reached, do not attempt scaling
 		}
 

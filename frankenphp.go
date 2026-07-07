@@ -798,6 +798,7 @@ func resetGlobals() {
 	workersByName = nil
 	workersByPath = nil
 	watcherIsEnabled = false
+	upscalingEnabled.Store(false)
 	maxIdleTime = defaultMaxIdleTime
 	maxRequestsPerThread = 0
 	globalMu.Unlock()

@@ -160,6 +160,13 @@ func handleRequestWithRegularPHPThreads(ch contextHolder) error {
 	queuedRegularThreads.Add(1)
 	metrics.QueuedRequest()
 
+	// skip the scaling case entirely if the upscaler is not running
+	// (nil channel: the case is never selected)
+	sc := scaleChan
+	if !upscalingEnabled.Load() {
+		sc = nil
+	}
+
 	for {
 		select {
 		case regularRequestChan <- ch:
@@ -170,7 +177,7 @@ func handleRequestWithRegularPHPThreads(ch contextHolder) error {
 			metrics.StopRequest()
 
 			return nil
-		case scaleChan <- ch.frankenPHPContext:
+		case sc <- ch.frankenPHPContext:
 			// the request has triggered scaling, continue to wait for a thread
 		case <-timeoutChan(time.Duration(maxWaitTime.Load())):
 			// the request has timed out stalling
