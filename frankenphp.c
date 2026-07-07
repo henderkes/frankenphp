@@ -114,6 +114,12 @@ typedef struct {
 } frankenphp_server_ctx;
 static __thread frankenphp_server_ctx frankenphp_local_server_ctx;
 
+/* Cookie header computed by go_update_request_info() and handed to
+ * sapi_activate() by frankenphp_read_cookies(), saving a dedicated C -> Go
+ * crossing per request. Owned by SG(request_info).cookie_data once consumed,
+ * freed either way in frankenphp_free_request_context(). */
+static __thread char *pending_cookie_data = NULL;
+
 static inline uintptr_t frankenphp_thread_index(void) {
   frankenphp_server_ctx *ctx = (frankenphp_server_ctx *)SG(server_context);
   /* Fall back to the OS thread's own TLS before
@@ -334,6 +340,11 @@ static void frankenphp_update_request_context() {
   char *authorization_header =
       go_update_request_info(thread_index, &SG(request_info));
 
+  /* stash the cookie header filled in by go_update_request_info() until
+   * sapi_activate() fetches it through frankenphp_read_cookies() */
+  pending_cookie_data = SG(request_info).cookie_data;
+  SG(request_info).cookie_data = NULL;
+
   /* let PHP handle basic auth */
   php_handle_auth_data(authorization_header);
 }
@@ -342,6 +353,12 @@ static void frankenphp_free_request_context() {
   if (SG(request_info).cookie_data != NULL) {
     free(SG(request_info).cookie_data);
     SG(request_info).cookie_data = NULL;
+  }
+
+  /* not consumed if the request never reached sapi_activate() */
+  if (pending_cookie_data != NULL) {
+    free(pending_cookie_data);
+    pending_cookie_data = NULL;
   }
 
   /* freed via thread.Unpin() */
@@ -1178,7 +1195,11 @@ static size_t frankenphp_read_post(char *buffer, size_t count_bytes) {
 }
 
 static char *frankenphp_read_cookies(void) {
-  return go_read_cookies(frankenphp_thread_index());
+  /* computed ahead of time by go_update_request_info(), no cgo crossing */
+  char *cookie_data = pending_cookie_data;
+  pending_cookie_data = NULL;
+
+  return cookie_data;
 }
 
 /* all variables with well defined keys can safely be registered like this */

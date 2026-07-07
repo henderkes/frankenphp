@@ -308,6 +308,16 @@ func go_update_request_info(threadIndex C.uintptr_t, info *C.sapi_request_info) 
 		info.content_type = thread.pinCString(contentType)
 	}
 
+	if cookie := strings.Join(request.Header.Values("Cookie"), "; "); cookie != "" {
+		// remove potential null bytes
+		cookie = strings.ReplaceAll(cookie, "\x00", "")
+
+		// stashed by frankenphp_update_request_context() until sapi_activate()
+		// fetches it via frankenphp_read_cookies(), sparing a dedicated
+		// C -> Go crossing; freed in frankenphp_free_request_context()
+		info.cookie_data = C.CString(cookie)
+	}
+
 	if fc.pathInfo != "" {
 		info.path_translated = thread.pinCString(sanitizedPathJoin(fc.documentRoot, fc.pathInfo)) // See: http://www.oreilly.com/openbook/cgi/ch02_04.html
 	}
