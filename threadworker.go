@@ -200,7 +200,7 @@ func (handler *workerThread) waitForWorkerRequest() (bool, any) {
 	// unpin any memory left over from previous requests
 	handler.thread.Unpin()
 
-	if globalLogger.Enabled(globalCtx, slog.LevelDebug) {
+	if debugLogEnabled.Load() {
 		globalLogger.LogAttrs(globalCtx, slog.LevelDebug, "waiting for request", slog.String("worker", handler.worker.name), slog.Int("thread", handler.thread.threadIndex))
 	}
 
@@ -218,7 +218,7 @@ func (handler *workerThread) waitForWorkerRequest() (bool, any) {
 
 	// max_requests reached: signal reboot for full ZTS cleanup
 	if maxRequestsPerThread > 0 && handler.requestCount >= maxRequestsPerThread {
-		if globalLogger.Enabled(globalCtx, slog.LevelDebug) {
+		if debugLogEnabled.Load() {
 			globalLogger.LogAttrs(globalCtx, slog.LevelDebug, "max requests reached, restarting",
 				slog.String("worker", handler.worker.name),
 				slog.Int("thread", handler.thread.threadIndex),
@@ -256,7 +256,7 @@ func (handler *workerThread) waitForWorkerRequest() (bool, any) {
 	handler.thread.contextMu.Unlock()
 	handler.state.MarkAsWaiting(false)
 
-	if globalLogger.Enabled(requestCH.ctx, slog.LevelDebug) {
+	if debugLogEnabled.Load() {
 		if handler.workerFrankenPHPContext.request == nil {
 			globalLogger.LogAttrs(requestCH.ctx, slog.LevelDebug, "request handling started", slog.String("worker", handler.worker.name), slog.Int("thread", handler.thread.threadIndex))
 		} else {
@@ -317,7 +317,7 @@ func go_frankenphp_finish_worker_request(threadIndex C.uintptr_t, retval *C.zval
 	thread.handler.(*workerThread).workerContext = nil
 	thread.contextMu.Unlock()
 
-	if globalLogger.Enabled(ctx, slog.LevelDebug) {
+	if debugLogEnabled.Load() {
 		if fc.request == nil {
 			fc.logger.LogAttrs(ctx, slog.LevelDebug, "request handling finished", slog.String("worker", fc.worker.name), slog.Int("thread", thread.threadIndex))
 		} else {
