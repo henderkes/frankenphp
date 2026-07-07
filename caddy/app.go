@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,10 @@ type FrankenPHPApp struct {
 	MaxIdleTime time.Duration `json:"max_idle_time,omitempty"`
 	// EXPERIMENTAL: MaxRequests sets the maximum number of requests a PHP thread handles before restarting (0 = unlimited)
 	MaxRequests int `json:"max_requests,omitempty"`
+	// GoMaxProcs sets the maximum number of OS threads simultaneously executing Go code (runtime.GOMAXPROCS).
+	// 0 (the default) leaves the Go runtime setting untouched (GOMAXPROCS environment variable or Go default).
+	// It is applied during provisioning, before PHP threads are spawned, so the num_threads default (2x GOMAXPROCS) derives from this value.
+	GoMaxProcs int `json:"gomaxprocs,omitempty"`
 
 	opts    []frankenphp.Option
 	metrics frankenphp.Metrics
@@ -80,6 +85,18 @@ func (f FrankenPHPApp) CaddyModule() caddy.ModuleInfo {
 func (f *FrankenPHPApp) Provision(ctx caddy.Context) error {
 	f.ctx = ctx
 	f.logger = ctx.Slogger()
+
+	if f.GoMaxProcs < 0 {
+		return fmt.Errorf(`"gomaxprocs" must be a positive integer, got %d`, f.GoMaxProcs)
+	}
+	if f.GoMaxProcs > 0 {
+		// apply before frankenphp.Init() (called in Start()) so the num_threads
+		// default (2x GOMAXPROCS) is computed from the configured value
+		previous := runtime.GOMAXPROCS(f.GoMaxProcs)
+		if previous != f.GoMaxProcs && f.logger.Enabled(ctx, slog.LevelInfo) {
+			f.logger.LogAttrs(ctx, slog.LevelInfo, "GOMAXPROCS set", slog.Int("gomaxprocs", f.GoMaxProcs), slog.Int("previous", previous))
+		}
+	}
 
 	// We have at least 7 hardcoded options
 	f.opts = make([]frankenphp.Option, 0, 7+len(options))
@@ -226,6 +243,7 @@ func (f *FrankenPHPApp) Stop() error {
 	f.MaxWaitTime = 0
 	f.MaxIdleTime = 0
 	f.MaxRequests = 0
+	f.GoMaxProcs = 0
 
 	optionsMU.Lock()
 	options = nil
@@ -289,6 +307,20 @@ func (f *FrankenPHPApp) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 
 				f.MaxIdleTime = v
+			case "gomaxprocs":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+
+				v, err := strconv.Atoi(d.Val())
+				if err != nil {
+					return d.WrapErr(err)
+				}
+				if v < 0 {
+					return d.Errf(`"gomaxprocs" must be a positive integer, got %d`, v)
+				}
+
+				f.GoMaxProcs = v
 			case "max_requests":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -356,7 +388,7 @@ func (f *FrankenPHPApp) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 				f.Workers = append(f.Workers, wc)
 			default:
-				return wrongSubDirectiveError("frankenphp", "num_threads, max_threads, php_ini, worker, max_wait_time, max_idle_time, max_requests", d.Val())
+				return wrongSubDirectiveError("frankenphp", "num_threads, max_threads, gomaxprocs, php_ini, worker, max_wait_time, max_idle_time, max_requests", d.Val())
 			}
 		}
 	}

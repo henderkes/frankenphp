@@ -18,7 +18,7 @@ We strongly recommend changing these values. For best system stability, it is re
 To find the right values, it's best to run load tests simulating real traffic.
 [k6](https://k6.io) and [Gatling](https://gatling.io) are good tools for this.
 
-To configure the number of threads, use the `num_threads` option of the `php_server` and `php` directives.
+To configure the number of threads, use the `num_threads` option of the `frankenphp` [global option block](config.md#caddyfile-config) (it is not accepted by the `php_server` and `php` directives).
 To change the number of workers, use the `num` option of the `worker` section of the `frankenphp` directive.
 
 ### `max_threads`
@@ -65,6 +65,30 @@ If you run FrankenPHP in containers (Docker, Kubernetes, LXC...) and limit the m
 set the `GOMEMLIMIT` environment variable to the available amount of memory.
 
 For more details, [read the Go runtime environment variables reference](https://pkg.go.dev/runtime#hdr-Environment_Variables) to get the most out of the runtime.
+
+### `gomaxprocs`
+
+The `gomaxprocs` option of the `frankenphp` [global option block](config.md#caddyfile-config) sets `runtime.GOMAXPROCS`, the maximum number of OS threads that can execute Go code simultaneously:
+
+```caddyfile
+{
+    frankenphp {
+        gomaxprocs 8
+    }
+}
+```
+
+When set to a value greater than `0`, it is applied during provisioning, before PHP threads are spawned.
+This means the `num_threads` default (2x `GOMAXPROCS`) is derived from the configured value.
+When absent or set to `0`, the Go runtime setting is left untouched (the `GOMAXPROCS` environment variable or the Go default, the number of available CPUs, applies).
+Note that after a configuration reload, removing the option keeps the last configured value until the process is restarted.
+
+In our measurements on a CPU-saturated 4-core host, setting `GOMAXPROCS` to 2x the number of CPU cores improved throughput
+across the full micro-benchmark suite by roughly 19–21% (both regular and worker mode). Combining it with `num_threads` set to
+approximately the number of CPU cores + 1 (in worker mode) gave the best results overall. The gains are workload-dependent,
+however: on the same host, a real-world Symfony application showed no measurable change from raising `GOMAXPROCS` alone.
+And since IO-bound applications need more PHP threads than CPU cores to keep the CPUs busy, always profile your own
+application under realistic load before lowering `num_threads`.
 
 ## `file_server`
 

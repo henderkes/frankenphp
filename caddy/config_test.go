@@ -208,6 +208,54 @@ func TestModuleWorkersDifferentNamesSucceed(t *testing.T) {
 	require.Equal(t, "m#test-worker-2", app.Workers[1].Name, "Second worker should have the correct name")
 }
 
+func TestGlobalGoMaxProcsParsing(t *testing.T) {
+	// valid value is parsed like num_threads
+	app := &FrankenPHPApp{}
+	d := caddyfile.NewTestDispenser(`
+	frankenphp {
+		num_threads 5
+		gomaxprocs 8
+	}`)
+	require.NoError(t, app.UnmarshalCaddyfile(d))
+	require.Equal(t, 8, app.GoMaxProcs, "gomaxprocs should be parsed from the global block")
+	require.Equal(t, 5, app.NumThreads, "num_threads should still be parsed alongside gomaxprocs")
+
+	// explicit 0 is allowed and keeps the default behavior (Go runtime setting untouched)
+	app = &FrankenPHPApp{}
+	d = caddyfile.NewTestDispenser(`
+	frankenphp {
+		gomaxprocs 0
+	}`)
+	require.NoError(t, app.UnmarshalCaddyfile(d))
+	require.Equal(t, 0, app.GoMaxProcs)
+
+	// negative values are rejected
+	app = &FrankenPHPApp{}
+	d = caddyfile.NewTestDispenser(`
+	frankenphp {
+		gomaxprocs -2
+	}`)
+	err := app.UnmarshalCaddyfile(d)
+	require.Error(t, err, "negative gomaxprocs must be rejected")
+	require.Contains(t, err.Error(), "gomaxprocs")
+
+	// non-integer values are rejected
+	app = &FrankenPHPApp{}
+	d = caddyfile.NewTestDispenser(`
+	frankenphp {
+		gomaxprocs auto
+	}`)
+	require.Error(t, app.UnmarshalCaddyfile(d), "non-integer gomaxprocs must be rejected")
+
+	// a missing argument is rejected
+	app = &FrankenPHPApp{}
+	d = caddyfile.NewTestDispenser(`
+	frankenphp {
+		gomaxprocs
+	}`)
+	require.Error(t, app.UnmarshalCaddyfile(d), "gomaxprocs requires an argument")
+}
+
 func TestModuleWorkerWithEnvironmentVariables(t *testing.T) {
 	// Create a test configuration with environment variables
 	configWithEnv := `

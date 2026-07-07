@@ -103,6 +103,7 @@ You can also explicitly configure FrankenPHP using the [global option](https://c
 		max_wait_time <duration> # Sets the maximum time a request may wait for a free PHP thread before timing out. Default: disabled.
 		max_idle_time <duration> # Sets the maximum time an autoscaled thread may be idle before being deactivated. Default: 5s.
 		max_requests <num> # (experimental) Sets the maximum number of requests a PHP thread will handle before being restarted, useful for mitigating memory leaks. Applies to both regular and worker threads. Default: 0 (unlimited).
+		gomaxprocs <num> # Sets the maximum number of OS threads that can execute Go code simultaneously (runtime.GOMAXPROCS). Applied before PHP threads are spawned, so the num_threads default derives from it. Default: 0 (keep the GOMAXPROCS environment variable or the Go default).
 		php_ini <key> <value> # Set a php.ini directive. Can be used several times to set multiple directives.
 		worker {
 			file <path> # Sets the path to the worker script.
