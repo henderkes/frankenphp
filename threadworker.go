@@ -297,8 +297,9 @@ func go_frankenphp_worker_handle_request_start(threadIndex C.uintptr_t) (C.bool,
 //export go_frankenphp_finish_worker_request
 func go_frankenphp_finish_worker_request(threadIndex C.uintptr_t, retval *C.zval) {
 	thread := phpThreads[threadIndex]
+	handler := thread.handler.(*workerThread)
 	ctx := thread.context()
-	fc := ctx.Value(contextKey).(*frankenPHPContext)
+	fc := handler.workerFrankenPHPContext
 
 	if retval != nil {
 		r, err := GoValue[any](unsafe.Pointer(retval))
@@ -313,8 +314,8 @@ func go_frankenphp_finish_worker_request(threadIndex C.uintptr_t, retval *C.zval
 
 	fc.closeContext()
 	thread.contextMu.Lock()
-	thread.handler.(*workerThread).workerFrankenPHPContext = nil
-	thread.handler.(*workerThread).workerContext = nil
+	handler.workerFrankenPHPContext = nil
+	handler.workerContext = nil
 	thread.contextMu.Unlock()
 
 	if globalLogger.Enabled(ctx, slog.LevelDebug) {
