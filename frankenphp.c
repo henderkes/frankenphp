@@ -10,6 +10,7 @@
 #include <ext/session/php_session.h>
 #endif
 #include <inttypes.h>
+#include <limits.h>
 #include <php.h>
 #ifdef PHP_WIN32
 #include <config.w32.h>
@@ -91,6 +92,29 @@ frankenphp_config frankenphp_get_config() {
       false,
 #endif
   };
+}
+
+/* Written from Go (see updateLogLevelGate/lowerLogLevelGate in log.go),
+ * read racily by PHP threads. Starts fully open so nothing is dropped
+ * before Go installs a logger. */
+int frankenphp_min_log_level = INT_MIN;
+
+/* Maps a syslog priority to the Go log/slog level it will be emitted at.
+ * Must mirror the switch in go_log (frankenphp.go). */
+static int frankenphp_syslog_to_slog_level(int syslog_type_int) {
+  switch (syslog_type_int) {
+  case LOG_EMERG:
+  case LOG_ALERT:
+  case LOG_CRIT:
+  case LOG_ERR:
+    return 8; /* slog.LevelError */
+  case LOG_WARNING:
+    return 4; /* slog.LevelWarn */
+  case LOG_DEBUG:
+    return -4; /* slog.LevelDebug */
+  default:
+    return 0; /* slog.LevelInfo */
+  }
 }
 
 bool should_filter_var = 0;
@@ -974,6 +998,12 @@ PHP_FUNCTION(frankenphp_log) {
   Z_PARAM_ARRAY(context)
   ZEND_PARSE_PARAMETERS_END();
 
+  /* below the minimum enabled level: skip the cgo crossing entirely,
+   * the message would be filtered on the Go side anyway */
+  if (level < (zend_long)frankenphp_min_log_level) {
+    return;
+  }
+
   char *ret = NULL;
   ret = go_log_attrs(frankenphp_thread_index(), message, level, context);
   if (ret != NULL) {
@@ -1368,6 +1398,12 @@ static void frankenphp_register_variables(zval *track_vars_array) {
 }
 
 static void frankenphp_log_message(const char *message, int syslog_type_int) {
+  /* below the minimum enabled level: skip the cgo crossing entirely */
+  if (frankenphp_syslog_to_slog_level(syslog_type_int) <
+      frankenphp_min_log_level) {
+    return;
+  }
+
   go_log(frankenphp_thread_index(), (char *)message, syslog_type_int);
 }
 
@@ -1568,7 +1604,9 @@ static void *php_thread(void *arg) {
     /* Log the last error message, it must be cleared to prevent a crash when
      * freeing execution globals */
     if (PG(last_error_message)) {
-      go_log_attrs(thread_index, PG(last_error_message), 8, NULL);
+      if (frankenphp_min_log_level <= 8 /* slog.LevelError */) {
+        go_log_attrs(thread_index, PG(last_error_message), 8, NULL);
+      }
       PG(last_error_message) = NULL;
       PG(last_error_file) = NULL;
     }
