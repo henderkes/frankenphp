@@ -297,8 +297,17 @@ func go_frankenphp_worker_handle_request_start(threadIndex C.uintptr_t) (C.bool,
 //export go_frankenphp_finish_worker_request
 func go_frankenphp_finish_worker_request(threadIndex C.uintptr_t, retval *C.zval) {
 	thread := phpThreads[threadIndex]
-	ctx := thread.context()
-	fc := ctx.Value(contextKey).(*frankenPHPContext)
+	handler := thread.handler.(*workerThread)
+
+	// access the handler's fields directly instead of re-deriving the context
+	// via thread.context() and ctx.Value() on every request
+	fc := handler.workerFrankenPHPContext
+	ctx := handler.workerContext
+	if fc == nil {
+		// should not happen, kept as a safety net (matches thread.context() fallback)
+		fc = handler.dummyFrankenPHPContext
+		ctx = handler.dummyContext
+	}
 
 	if retval != nil {
 		r, err := GoValue[any](unsafe.Pointer(retval))
@@ -313,8 +322,8 @@ func go_frankenphp_finish_worker_request(threadIndex C.uintptr_t, retval *C.zval
 
 	fc.closeContext()
 	thread.contextMu.Lock()
-	thread.handler.(*workerThread).workerFrankenPHPContext = nil
-	thread.handler.(*workerThread).workerContext = nil
+	handler.workerFrankenPHPContext = nil
+	handler.workerContext = nil
 	thread.contextMu.Unlock()
 
 	if debugLogEnabled.Load() {
