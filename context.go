@@ -54,10 +54,17 @@ func fromContext(ctx context.Context) (fctx *frankenPHPContext, ok bool) {
 }
 
 func newFrankenPHPContext() *frankenPHPContext {
-	return &frankenPHPContext{
-		done:      make(chan any),
-		startedAt: time.Now(),
+	fc := &frankenPHPContext{
+		done: make(chan any),
 	}
+
+	// startedAt only feeds metrics and the autoscaling stall check; when
+	// metrics are disabled it is stamped lazily if the request is queued
+	if metricsEnabled {
+		fc.startedAt = time.Now()
+	}
+
+	return fc
 }
 
 // NewRequestWithContext creates a new FrankenPHP request context.

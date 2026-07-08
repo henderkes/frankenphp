@@ -235,7 +235,9 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 			case thread.requestChan <- ch:
 				worker.threadMutex.RUnlock()
 				<-ch.frankenPHPContext.done
-				metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+				if metricsEnabled {
+					metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+				}
 
 				return nil
 			default:
@@ -246,6 +248,10 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 	}
 
 	// if no thread was available, mark the request as queued and apply the scaling strategy
+	if ch.frankenPHPContext.startedAt.IsZero() {
+		// stamp lazily so the autoscaling stall check works when metrics are disabled
+		ch.frankenPHPContext.startedAt = time.Now()
+	}
 	worker.queuedRequests.Add(1)
 	metrics.QueuedWorkerRequest(worker.name)
 
@@ -260,7 +266,9 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 			worker.queuedRequests.Add(-1)
 			metrics.DequeuedWorkerRequest(worker.name)
 			<-ch.frankenPHPContext.done
-			metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+			if metricsEnabled {
+				metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+			}
 
 			return nil
 		case workerScaleChan <- ch.frankenPHPContext:
@@ -269,7 +277,9 @@ func (worker *worker) handleRequest(ch contextHolder) error {
 			// the request has timed out stalling
 			worker.queuedRequests.Add(-1)
 			metrics.DequeuedWorkerRequest(worker.name)
-			metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+			if metricsEnabled {
+				metrics.StopWorkerRequest(worker.name, time.Since(ch.frankenPHPContext.startedAt))
+			}
 
 			ch.frankenPHPContext.reject(ErrMaxWaitTimeExceeded)
 

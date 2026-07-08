@@ -66,6 +66,28 @@ ZEND_TSRMLS_CACHE_DEFINE()
  */
 static const char *MODULES_TO_RELOAD[] = {"filter", NULL};
 
+#define MODULES_TO_RELOAD_COUNT                                                \
+  (sizeof(MODULES_TO_RELOAD) / sizeof(MODULES_TO_RELOAD[0]) - 1)
+
+/* Module entries are registered once at engine startup and are stable for
+ * the lifetime of the process, so resolve the hash lookups once per thread
+ * instead of on every worker request. */
+static __thread zend_module_entry
+    *modules_to_reload_cache[MODULES_TO_RELOAD_COUNT];
+static __thread bool modules_to_reload_cached = false;
+
+static zend_always_inline void frankenphp_resolve_modules_to_reload(void) {
+  if (EXPECTED(modules_to_reload_cached)) {
+    return;
+  }
+
+  for (size_t i = 0; i < MODULES_TO_RELOAD_COUNT; i++) {
+    modules_to_reload_cache[i] = zend_hash_str_find_ptr(
+        &module_registry, MODULES_TO_RELOAD[i], strlen(MODULES_TO_RELOAD[i]));
+  }
+  modules_to_reload_cached = true;
+}
+
 frankenphp_version frankenphp_get_version() {
   return (frankenphp_version){
       PHP_MAJOR_VERSION, PHP_MINOR_VERSION, PHP_RELEASE_VERSION,
@@ -485,11 +507,10 @@ static void frankenphp_worker_request_shutdown() {
   zend_try { php_output_end_all(); }
   zend_end_try();
 
-  const char **module_name;
-  zend_module_entry *module;
-  for (module_name = MODULES_TO_RELOAD; *module_name; module_name++) {
-    if ((module = zend_hash_str_find_ptr(&module_registry, *module_name,
-                                         strlen(*module_name)))) {
+  frankenphp_resolve_modules_to_reload();
+  for (size_t i = 0; i < MODULES_TO_RELOAD_COUNT; i++) {
+    zend_module_entry *module = modules_to_reload_cache[i];
+    if (module) {
       module->request_shutdown_func(module->type, module->module_number);
     }
   }
@@ -582,12 +603,10 @@ static int frankenphp_worker_request_startup() {
 
     frankenphp_reset_super_globals();
 
-    const char **module_name;
-    zend_module_entry *module;
-    for (module_name = MODULES_TO_RELOAD; *module_name; module_name++) {
-      if ((module = zend_hash_str_find_ptr(&module_registry, *module_name,
-                                           strlen(*module_name))) &&
-          module->request_startup_func) {
+    frankenphp_resolve_modules_to_reload();
+    for (size_t i = 0; i < MODULES_TO_RELOAD_COUNT; i++) {
+      zend_module_entry *module = modules_to_reload_cache[i];
+      if (module && module->request_startup_func) {
         module->request_startup_func(module->type, module->module_number);
       }
     }

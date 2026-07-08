@@ -91,7 +91,7 @@ func (handler *regularThread) drain() {}
 func (handler *regularThread) waitForRequest() string {
 	// max_requests reached: restart the thread to clean up all ZTS state
 	if maxRequestsPerThread > 0 && handler.requestCount >= maxRequestsPerThread {
-		if globalLogger.Enabled(globalCtx, slog.LevelDebug) {
+		if debugLogEnabled.Load() {
 			globalLogger.LogAttrs(globalCtx, slog.LevelDebug, "max requests reached, restarting thread",
 				slog.Int("thread", handler.thread.threadIndex),
 				slog.Int("max_requests", maxRequestsPerThread),
@@ -157,6 +157,10 @@ func handleRequestWithRegularPHPThreads(ch contextHolder) error {
 	}
 
 	// if no thread was available, mark the request as queued and fan it out to all threads
+	if ch.frankenPHPContext.startedAt.IsZero() {
+		// stamp lazily so the autoscaling stall check works when metrics are disabled
+		ch.frankenPHPContext.startedAt = time.Now()
+	}
 	queuedRegularThreads.Add(1)
 	metrics.QueuedRequest()
 

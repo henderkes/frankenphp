@@ -65,7 +65,15 @@ var (
 	globalCtx    = context.Background()
 	globalLogger = slog.Default()
 
+	// caches globalLogger.Enabled(globalCtx, slog.LevelDebug) so per-request
+	// hot paths don't pay for repeated Enabled() calls; recomputed wherever
+	// globalLogger is assigned
+	debugLogEnabled atomic.Bool
+
 	metrics Metrics = nullMetrics{}
+	// true when a real (non-null) metrics collector is configured; lets hot
+	// paths skip time.Now()/time.Since() calls that only feed metrics
+	metricsEnabled bool
 
 	// atomic: read by in-flight requests while a reload may rewrite it
 	maxWaitTime          atomic.Int64
@@ -270,12 +278,15 @@ func Init(options ...Option) error {
 		globalLogger = opt.logger
 		opt.logger = nil
 	}
+	debugLogEnabled.Store(globalLogger.Enabled(globalCtx, slog.LevelDebug))
 
 	globalMu.Unlock()
 
 	if opt.metrics != nil {
 		metrics = opt.metrics
 	}
+	_, hasNullMetrics := metrics.(nullMetrics)
+	metricsEnabled = !hasNullMetrics
 
 	maxWaitTime.Store(int64(opt.maxWaitTime))
 	maxRequestsPerThread = opt.maxRequests
@@ -794,6 +805,7 @@ func resetGlobals() {
 	globalMu.Lock()
 	globalCtx = context.Background()
 	globalLogger = slog.Default()
+	debugLogEnabled.Store(globalLogger.Enabled(globalCtx, slog.LevelDebug))
 	workers = nil
 	workersByName = nil
 	workersByPath = nil
