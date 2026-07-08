@@ -665,25 +665,6 @@ func go_read_post(threadIndex C.uintptr_t, cBuf *C.char, countBytes C.size_t) (r
 	return
 }
 
-//export go_read_cookies
-func go_read_cookies(threadIndex C.uintptr_t) *C.char {
-	request := phpThreads[threadIndex].frankenPHPContext().request
-	if request == nil {
-		return nil
-	}
-
-	cookie := strings.Join(request.Header.Values("Cookie"), "; ")
-	if cookie == "" {
-		return nil
-	}
-
-	// remove potential null bytes
-	cookie = strings.ReplaceAll(cookie, "\x00", "")
-
-	// freed in frankenphp_free_request_context()
-	return C.CString(cookie)
-}
-
 func getLogger(threadIndex C.uintptr_t) (*slog.Logger, context.Context) {
 	ctxHolder := phpThreads[threadIndex]
 	if ctxHolder == nil {
