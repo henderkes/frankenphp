@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dunglas/frankenphp/internal/cpu"
@@ -32,6 +33,13 @@ var (
 	scaleChan         chan *frankenPHPContext
 	autoScaledThreads = []*phpThread{}
 	scalingMu         = new(sync.RWMutex)
+
+	// upscalingEnabled reports whether the upscaler goroutine is running
+	// (i.e. max_threads > num_threads). When false, queued request loops
+	// skip the scaleChan select case entirely (a send could never proceed
+	// anyway, as no receiver is alive), avoiding contention on the shared
+	// channel lock under saturation.
+	upscalingEnabled atomic.Bool
 )
 
 func initAutoScaling(mainThread *phpMainThread) {
@@ -41,8 +49,12 @@ func initAutoScaling(mainThread *phpMainThread) {
 	}
 
 	if mainThread.maxThreads <= mainThread.numThreads {
+		upscalingEnabled.Store(false)
+
 		return
 	}
+
+	upscalingEnabled.Store(true)
 
 	done := mainThread.done
 	mstate := mainThread.state
