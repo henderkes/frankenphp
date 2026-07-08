@@ -29,6 +29,9 @@ type frankenPHPContext struct {
 	scriptName     string
 	scriptFilename string
 	requestURI     string
+	// originalRequestURI is the URI of the request before any rewrite,
+	// pre-computed by the caller (empty if unknown).
+	originalRequestURI string
 
 	// Whether the request is already closed by us
 	isDone bool

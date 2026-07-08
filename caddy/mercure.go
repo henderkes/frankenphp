@@ -27,13 +27,18 @@ func (f *FrankenPHPModule) assignMercureHub(ctx caddy.Context) {
 		return
 	}
 
-	f.requestOptions = append(f.requestOptions, frankenphp.WithMercureHub(f.mercureHub))
-
 	for i, wc := range f.Workers {
 		wc.mercureHub = f.mercureHub
 		wc.options = append(wc.options, frankenphp.WithWorkerMercureHub(wc.mercureHub))
 
 		f.Workers[i] = wc
+	}
+}
+
+// setParamsMercureHub propagates the Mercure hub to the pre-computed request parameters.
+func (f *FrankenPHPModule) setParamsMercureHub() {
+	if f.mercureHub != nil {
+		f.params.SetMercureHub(f.mercureHub)
 	}
 }
 

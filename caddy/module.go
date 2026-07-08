@@ -52,7 +52,7 @@ type FrankenPHPModule struct {
 	preparedEnv                 frankenphp.PreparedEnv
 	preparedEnvNeedsReplacement bool
 	logger                      *slog.Logger
-	requestOptions              []frankenphp.RequestOption
+	params                      frankenphp.RequestParams
 }
 
 // CaddyModule returns the Caddy module information.
@@ -120,11 +120,10 @@ func (f *FrankenPHPModule) Provision(ctx caddy.Context) error {
 		f.SplitPath = []string{".php"}
 	}
 
-	opt, err := frankenphp.WithRequestSplitPath(f.SplitPath)
-	if err != nil {
+	// validates and normalizes f.SplitPath in place (lower-case ASCII)
+	if _, err := frankenphp.WithRequestSplitPath(f.SplitPath); err != nil {
 		return fmt.Errorf("invalid split_path: %w", err)
 	}
-	f.requestOptions = append(f.requestOptions, opt)
 
 	if f.ResolveRootSymlink == nil {
 		f.ResolveRootSymlink = new(true)
@@ -167,8 +166,6 @@ func (f *FrankenPHPModule) Provision(ctx caddy.Context) error {
 				f.Workers[i].matchRelPath = filepath.ToSlash(f.Workers[i].absFileName[len(f.resolvedDocumentRoot):])
 			}
 		}
-
-		f.requestOptions = append(f.requestOptions, frankenphp.WithRequestResolvedDocumentRoot(f.resolvedDocumentRoot))
 	}
 
 	if f.preparedEnv == nil {
@@ -183,13 +180,20 @@ func (f *FrankenPHPModule) Provision(ctx caddy.Context) error {
 		}
 	}
 
-	if !f.preparedEnvNeedsReplacement {
-		f.requestOptions = append(f.requestOptions, frankenphp.WithRequestPreparedEnv(f.preparedEnv))
-	}
-
 	if err := f.configureHotReload(fapp); err != nil {
 		return err
 	}
+
+	// Pre-compute the per-handler request parameters used by the ServeHTTP fast path.
+	// WithRequestSplitPath normalized f.SplitPath in place above.
+	f.params = frankenphp.RequestParams{
+		DocumentRoot: f.resolvedDocumentRoot,
+		SplitPath:    f.SplitPath,
+	}
+	if !f.preparedEnvNeedsReplacement {
+		f.params.Env = f.preparedEnv
+	}
+	f.setParamsMercureHub()
 
 	return nil
 }
@@ -202,12 +206,14 @@ func needReplacement(s string) bool {
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (f *FrankenPHPModule) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.Handler) error {
 	ctx := r.Context()
-	repl := ctx.Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 
+	params := f.params
 	documentRoot := f.resolvedDocumentRoot
 
-	opts := make([]frankenphp.RequestOption, 0, len(f.requestOptions)+4)
-	opts = append(opts, f.requestOptions...)
+	var repl *caddy.Replacer
+	if documentRoot == "" || f.preparedEnvNeedsReplacement {
+		repl = ctx.Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
+	}
 
 	if documentRoot == "" {
 		documentRoot = repl.ReplaceKnown(f.Root, "")
@@ -218,7 +224,8 @@ func (f *FrankenPHPModule) ServeHTTP(w http.ResponseWriter, r *http.Request, _ c
 		// If we do not have a resolved document root, then we cannot resolve the symlink of our cwd because it may
 		// resolve to a different directory than the one we are currently in.
 		// This is especially important if there are workers running.
-		opts = append(opts, frankenphp.WithRequestDocumentRoot(documentRoot, false))
+		params.DocumentRoot = documentRoot
+		params.ResolveDocumentRoot = true
 	}
 
 	if f.preparedEnvNeedsReplacement {
@@ -227,31 +234,21 @@ func (f *FrankenPHPModule) ServeHTTP(w http.ResponseWriter, r *http.Request, _ c
 			env[k] = repl.ReplaceKnown(v, "")
 		}
 
-		opts = append(opts, frankenphp.WithRequestPreparedEnv(env))
+		params.Env = env
 	}
 
-	workerName := ""
-	for _, w := range f.Workers {
-		if w.matchesPath(r, documentRoot) {
-			workerName = w.Name
+	for _, wrk := range f.Workers {
+		if wrk.matchesPath(r, documentRoot) {
+			params.WorkerName = wrk.Name
 			break
 		}
 	}
 
-	fr, err := frankenphp.NewRequestWithContext(
-		r,
-		append(
-			opts,
-			frankenphp.WithOriginalRequest(new(ctx.Value(caddyhttp.OriginalRequestCtxKey).(http.Request))),
-			frankenphp.WithWorkerName(workerName),
-		)...,
-	)
-
-	if err != nil {
-		return caddyhttp.Error(http.StatusInternalServerError, err)
+	if origReq, ok := ctx.Value(caddyhttp.OriginalRequestCtxKey).(http.Request); ok {
+		params.OriginalRequestURI = origReq.URL.RequestURI()
 	}
 
-	if err = frankenphp.ServeHTTP(w, fr); err != nil && !errors.As(err, &frankenphp.ErrRejected{}) {
+	if err := frankenphp.ServeHTTPWithParams(w, r, params); err != nil && !errors.As(err, &frankenphp.ErrRejected{}) {
 		return caddyhttp.Error(http.StatusInternalServerError, err)
 	}
 

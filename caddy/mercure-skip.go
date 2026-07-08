@@ -13,6 +13,9 @@ type mercureContext struct {
 func (f *FrankenPHPModule) assignMercureHub(_ caddy.Context) {
 }
 
+func (f *FrankenPHPModule) setParamsMercureHub() {
+}
+
 func createMercureRoute() (caddyhttp.Route, error) {
 	return caddyhttp.Route{}, nil
 }

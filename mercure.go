@@ -81,6 +81,11 @@ func (w *worker) configureMercure(o *workerOpt) {
 	w.mercureHub = o.mercureHub
 }
 
+// SetMercureHub sets the mercure.Hub to use to publish updates for requests served with these parameters
+func (p *RequestParams) SetMercureHub(hub *mercure.Hub) {
+	p.mercureHub = hub
+}
+
 // WithMercureHub sets the mercure.Hub to use to publish updates
 func WithMercureHub(hub *mercure.Hub) RequestOption {
 	return func(o *frankenPHPContext) error {

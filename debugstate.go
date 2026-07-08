@@ -80,12 +80,16 @@ func threadDebugState(thread *phpThread) ThreadDebugState {
 		return s
 	}
 
-	if fc.originalRequest == nil {
-		s.CurrentURI = fc.requestURI
+	switch {
+	case fc.originalRequestURI != "":
+		s.CurrentURI = fc.originalRequestURI
 		s.CurrentMethod = fc.request.Method
-	} else {
+	case fc.originalRequest != nil:
 		s.CurrentURI = fc.originalRequest.URL.RequestURI()
 		s.CurrentMethod = fc.originalRequest.Method
+	default:
+		s.CurrentURI = fc.requestURI
+		s.CurrentMethod = fc.request.Method
 	}
 
 	if !fc.startedAt.IsZero() {

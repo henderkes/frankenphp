@@ -32,31 +32,42 @@ var (
 // directive will set $_SERVER['DOCUMENT_ROOT'] to the real directory path.
 func WithRequestDocumentRoot(documentRoot string, resolveSymlink bool) RequestOption {
 	return func(o *frankenPHPContext) (err error) {
-		v, ok := documentRootCache.Load(documentRoot)
-		if !ok {
-			// make sure file root is absolute
-			v, err = fastabs.FastAbs(documentRoot)
-			if err != nil {
-				return err
-			}
-
-			// prevent the cache to grow forever, this is a totally arbitrary value
-			if documentRootCacheLen.Load() < 1024 {
-				documentRootCache.LoadOrStore(documentRoot, v)
-				documentRootCacheLen.Add(1)
-			}
+		root, err := absDocumentRoot(documentRoot)
+		if err != nil {
+			return err
 		}
 
 		if resolveSymlink {
-			if v, err = filepath.EvalSymlinks(v.(string)); err != nil {
+			if root, err = filepath.EvalSymlinks(root); err != nil {
 				return err
 			}
 		}
 
-		o.documentRoot = v.(string)
+		o.documentRoot = root
 
 		return nil
 	}
+}
+
+// absDocumentRoot makes the document root absolute, using a bounded cache.
+func absDocumentRoot(documentRoot string) (string, error) {
+	v, ok := documentRootCache.Load(documentRoot)
+	if !ok {
+		// make sure file root is absolute
+		root, err := fastabs.FastAbs(documentRoot)
+		if err != nil {
+			return "", err
+		}
+		v = root
+
+		// prevent the cache to grow forever, this is a totally arbitrary value
+		if documentRootCacheLen.Load() < 1024 {
+			documentRootCache.LoadOrStore(documentRoot, v)
+			documentRootCacheLen.Add(1)
+		}
+	}
+
+	return v.(string), nil
 }
 
 // WithRequestResolvedDocumentRoot is similar to WithRequestDocumentRoot
