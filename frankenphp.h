@@ -209,6 +209,14 @@ void frankenphp_merge_with_prepared_env(zval *track_vars_array);
 zend_string *frankenphp_init_persistent_string(const char *string, size_t len);
 int frankenphp_get_current_memory_limit();
 
+/* Minimum log level (Go log/slog units: DEBUG=-4, INFO=0, WARN=4, ERROR=8)
+ * currently enabled on the Go logger. Written from Go whenever a logger is
+ * installed (Init, reset, more verbose per-request logger) and read racily
+ * by PHP threads to skip the cgo crossing entirely for log messages that
+ * would be filtered out anyway (staleness of a single write is harmless:
+ * the Go side always re-filters exactly). INT_MIN disables the gate. */
+extern int frankenphp_min_log_level;
+
 typedef struct {
   size_t last_memory_usage;
 } frankenphp_thread_metrics;

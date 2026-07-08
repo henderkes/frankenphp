@@ -282,6 +282,8 @@ func Init(options ...Option) error {
 
 	globalMu.Unlock()
 
+	updateLogLevelGate()
+
 	if opt.metrics != nil {
 		metrics = opt.metrics
 	}
@@ -709,7 +711,12 @@ func go_log(threadIndex C.uintptr_t, message *C.char, level C.int) {
 		return
 	}
 
-	logger.LogAttrs(ctx, slogLevel, C.GoString(message), slog.String("syslog_level", le.String()))
+	// Emit through the handler directly with a zero PC: unlike
+	// logger.LogAttrs, this skips runtime.Callers, and the PC would point
+	// to FrankenPHP internals rather than the PHP code anyway.
+	record := slog.NewRecord(time.Now(), slogLevel, C.GoString(message), 0)
+	record.AddAttrs(slog.String("syslog_level", le.String()))
+	_ = logger.Handler().Handle(ctx, record)
 }
 
 //export go_log_attrs
@@ -732,7 +739,12 @@ func go_log_attrs(threadIndex C.uintptr_t, message *C.zend_string, cLevel C.zend
 		}
 	}
 
-	logger.LogAttrs(ctx, level, GoString(unsafe.Pointer(message)), mapToAttr(attrs)...)
+	// Emit through the handler directly with a zero PC: unlike
+	// logger.LogAttrs, this skips runtime.Callers, and the PC would point
+	// to FrankenPHP internals rather than the PHP code anyway.
+	record := slog.NewRecord(time.Now(), level, GoString(unsafe.Pointer(message)), 0)
+	record.AddAttrs(mapToAttr(attrs)...)
+	_ = logger.Handler().Handle(ctx, record)
 
 	return nil
 }
@@ -795,4 +807,6 @@ func resetGlobals() {
 	maxIdleTime = defaultMaxIdleTime
 	maxRequestsPerThread = 0
 	globalMu.Unlock()
+
+	updateLogLevelGate()
 }

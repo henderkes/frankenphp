@@ -92,6 +92,9 @@ func NewRequestWithContext(r *http.Request, opts ...RequestOption) (*http.Reques
 
 	if fc.logger == nil {
 		fc.logger = globalLogger
+	} else if fc.logger != globalLogger {
+		// keep the C-side log level gate at least as verbose as this logger
+		lowerLogLevelGate(fc.logger)
 	}
 
 	if fc.documentRoot == "" {
