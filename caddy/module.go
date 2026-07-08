@@ -395,6 +395,9 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 	// set up for explicitly overriding try_files
 	var tryFiles []string
 
+	// escape hatch for the stat-based file matcher substitution
+	disableStatMatcher := false
+
 	// if the user specified a matcher token, use that
 	// matcher in a route that wraps both of our routes;
 	// either way, strip the matcher token and pass
@@ -463,6 +466,14 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 					return nil, dispenser.ArgErr()
 				}
 				disableFsrv = true
+
+			case "disable_stat_matcher":
+				args := dispenser.RemainingArgs()
+				dispenser.DeleteN(len(args) + 1)
+				if len(args) != 0 {
+					return nil, dispenser.ArgErr()
+				}
+				disableStatMatcher = true
 			}
 		}
 	}
@@ -495,7 +506,7 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 	routes := caddyhttp.RouteList{}
 
 	// prepend routes from the 'worker match *' directives
-	routes = prependWorkerRoutes(routes, h, phpsrv, fsrv, disableFsrv)
+	routes = prependWorkerRoutes(routes, h, phpsrv, fsrv, disableFsrv, disableStatMatcher)
 
 	// set the list of allowed path segments on which to split
 	phpsrv.SplitPath = extensions
@@ -539,9 +550,10 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 		if dirRedir {
 			redirMatcherSet := caddy.ModuleMap{
 				"php_dir_index": h.JSON(MatchDirIndex{
-					Root:      phpsrv.Root,
-					Index:     indexFile,
-					SplitPath: extensions,
+					Root:        phpsrv.Root,
+					Index:       indexFile,
+					SplitPath:   extensions,
+					DisableStat: disableStatMatcher,
 				}),
 			}
 			redirHandler := caddyhttp.StaticResponse{
@@ -557,13 +569,14 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 		}
 
 		// route to rewrite to PHP index file
+		rewriteMatcherName, rewriteMatcherVal := fileMatcherModule(fileserver.MatchFile{
+			TryFiles:  tryFiles,
+			TryPolicy: tryPolicy,
+			SplitPath: extensions,
+			Root:      phpsrv.Root,
+		}, disableStatMatcher)
 		rewriteMatcherSet := caddy.ModuleMap{
-			"file": h.JSON(fileserver.MatchFile{
-				TryFiles:  tryFiles,
-				TryPolicy: tryPolicy,
-				SplitPath: extensions,
-				Root:      phpsrv.Root,
-			}),
+			rewriteMatcherName: h.JSON(rewriteMatcherVal),
 		}
 		rewriteHandler := rewrite.Rewrite{
 			URI: "{http.matchers.file.relative}{http.matchers.file.remainder}",
@@ -635,7 +648,7 @@ func parsePhpServer(h httpcaddyfile.Helper) ([]httpcaddyfile.ConfigValue, error)
 
 // workers can also match a path without being in the public directory
 // in this case we need to prepend the worker routes to the existing routes
-func prependWorkerRoutes(routes caddyhttp.RouteList, h httpcaddyfile.Helper, f FrankenPHPModule, fsrv caddy.Module, disableFsrv bool) caddyhttp.RouteList {
+func prependWorkerRoutes(routes caddyhttp.RouteList, h httpcaddyfile.Helper, f FrankenPHPModule, fsrv caddy.Module, disableFsrv bool, disableStatMatcher bool) caddyhttp.RouteList {
 	var allWorkerMatches caddyhttp.MatchPath
 	for _, w := range f.Workers {
 		for _, path := range w.MatchPath {
@@ -649,13 +662,14 @@ func prependWorkerRoutes(routes caddyhttp.RouteList, h httpcaddyfile.Helper, f F
 
 	// if there are match patterns, we need to check for files beforehand
 	if !disableFsrv {
+		workerFileMatcherName, workerFileMatcherVal := fileMatcherModule(fileserver.MatchFile{
+			TryFiles: []string{"{http.request.uri.path}"},
+			Root:     f.Root,
+		}, disableStatMatcher)
 		routes = append(routes, caddyhttp.Route{
 			MatcherSetsRaw: []caddy.ModuleMap{
 				{
-					"file": h.JSON(fileserver.MatchFile{
-						TryFiles: []string{"{http.request.uri.path}"},
-						Root:     f.Root,
-					}),
+					workerFileMatcherName: h.JSON(workerFileMatcherVal),
 					"not": h.JSON(caddyhttp.MatchNot{
 						MatcherSetsRaw: []caddy.ModuleMap{
 							{"path": h.JSON(caddyhttp.MatchPath{"*.php"})},

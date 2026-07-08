@@ -53,8 +53,13 @@ type MatchDirIndex struct {
 	// SplitPath lists the path suffixes handled as PHP scripts (".php" by
 	// default). Requests whose path ends in one of them never match.
 	SplitPath []string `json:"split_path,omitempty"`
+	// DisableStat disables substituting the native stat-based file matcher
+	// (MatchFileStat) for the internal filesystem probe, falling back to the
+	// stock fileserver.MatchFile. Wired to php_server's disable_stat_matcher
+	// option.
+	DisableStat bool `json:"disable_stat,omitempty"`
 
-	file fileserver.MatchFile
+	file caddyhttp.RequestMatcherWithError
 }
 
 // CaddyModule returns the Caddy module information.
@@ -74,12 +79,32 @@ func (m *MatchDirIndex) Provision(ctx caddy.Context) error {
 		m.SplitPath = []string{".php"}
 	}
 
-	m.file = fileserver.MatchFile{
+	stock := fileserver.MatchFile{
 		Root:     m.Root,
 		TryFiles: []string{"{http.request.uri.path}/" + m.Index},
 	}
 
-	return m.file.Provision(ctx)
+	// use the native stat-based matcher for the filesystem probe when a
+	// semantics-preserving substitution is possible (see statmatcher.go)
+	if !m.DisableStat && statMatcherSubstitutable(stock) {
+		statFile := &MatchFileStat{
+			Root:     stock.Root,
+			TryFiles: stock.TryFiles,
+		}
+		if err := statFile.Provision(ctx); err != nil {
+			return err
+		}
+		m.file = statFile
+
+		return nil
+	}
+
+	if err := stock.Provision(ctx); err != nil {
+		return err
+	}
+	m.file = &stock
+
+	return nil
 }
 
 // Match returns true if r matches m.

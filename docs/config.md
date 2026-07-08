@@ -189,6 +189,7 @@ php_server [<matcher>] {
 	resolve_root_symlink false # Disables resolving the `root` directory to its actual value by evaluating a symbolic link, if one exists (enabled by default).
 	env <key> <value> # Sets an extra environment variable to the given value. Can be specified more than once for multiple environment variables.
 	file_server off # Disables the built-in file_server directive.
+	disable_stat_matcher # Escape hatch: always use Caddy's standard file matcher for try_files instead of FrankenPHP's optimized, semantics-preserving stat-based matcher (which is only substituted for glob- and placeholder-free try_files patterns anyway).
 	worker { # Creates a worker specific to this server. Can be specified more than once for multiple workers.
 		file <path> # Sets the path to the worker script, can be relative to the php_server root
 		num <num> # Sets the number of PHP threads to start, defaults to 2x the number of available

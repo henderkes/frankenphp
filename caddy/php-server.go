@@ -160,12 +160,13 @@ func cmdPHPServer(fs caddycmd.Flags) (int, error) {
 	}
 
 	// route to rewrite to PHP index file
+	rewriteMatcherName, rewriteMatcherVal := fileMatcherModule(fileserver.MatchFile{
+		Root:      root,
+		TryFiles:  tryFiles,
+		SplitPath: extensions,
+	}, false)
 	rewriteMatcherSet := caddy.ModuleMap{
-		"file": caddyconfig.JSON(fileserver.MatchFile{
-			Root:      root,
-			TryFiles:  tryFiles,
-			SplitPath: extensions,
-		}, nil),
+		rewriteMatcherName: caddyconfig.JSON(rewriteMatcherVal, nil),
 	}
 	rewriteHandler := rewrite.Rewrite{
 		URI: "{http.matchers.file.relative}{http.matchers.file.remainder}",
